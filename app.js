@@ -15,9 +15,14 @@ let state = {
   customCats: [],
   watchlist: [],
   concertCity: "New York",
+  alarms: [],
+  occasions: {},
   triviaBest: 0,
   hlBest: 0,
   rps: { w: 0, l: 0, t: 0, streak: 0, bestStreak: 0 },
+  currentPlayer: "",
+  players: [],
+  scores: {},
 };
 
 function loadState() {
@@ -81,14 +86,80 @@ function decodeEntities(s) {
   return t.value;
 }
 
+/* Deterministic daily Met artwork that ALWAYS has an image */
+async function metPick(q, seed) {
+  const s = await getJSON(`https://collectionapi.metmuseum.org/public/collection/v1/search?isHighlight=true&hasImages=true&q=${encodeURIComponent(q)}`, 720, {}, (d) => !!d?.objectIDs?.length);
+  const ids = s.objectIDs;
+  for (let k = 0; k < 6; k++) {
+    const i = (Math.floor(Date.now() / 86400000) * 11 + seed * 17 + k * 29) % ids.length;
+    const o = await getJSON(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${ids[i]}`, 1440);
+    if (o && o.primaryImageSmall) return o;
+  }
+  throw new Error("no image");
+}
+
+/* ---------- Players & leaderboards (local multi-user) ---------- */
+function currentPlayerName() { return state.currentPlayer || ""; }
+function registerPlayer(raw) {
+  const name = (raw || "").trim().slice(0, 18);
+  if (!name) return false;
+  if (!state.players) state.players = [];
+  if (!state.players.some((p) => p.toLowerCase() === name.toLowerCase())) state.players.push(name);
+  state.currentPlayer = name;
+  saveState();
+  return true;
+}
+function submitScore(game, score) {
+  const name = currentPlayerName();
+  if (!name || !isFinite(score)) return false;
+  if (!state.scores) state.scores = {};
+  if (!state.scores[game]) state.scores[game] = [];
+  state.scores[game].push({ name, score: Math.round(score), ts: Date.now() });
+  if (state.scores[game].length > 300) state.scores[game] = state.scores[game].slice(-300);
+  saveState();
+  return true;
+}
+function bestByName(game) {
+  const best = {};
+  (state.scores[game] || []).forEach((s) => {
+    if (!best[s.name] || s.score > best[s.name].score) best[s.name] = s;
+  });
+  return Object.values(best).sort((a, b) => b.score - a.score);
+}
+function boardHTML(game, unit = "pts") {
+  const me = currentPlayerName();
+  const rows = bestByName(game).slice(0, 5);
+  const medal = ["🥇", "🥈", "🥉"];
+  return `<div class="lb-box">
+    <div class="lb-head"><span>🏆 Leaderboard</span>${me ? `<span class="lb-me">👤 ${esc(me)}</span>` : ""}</div>
+    ${rows.map((r, i) =>
+      `<div class="list-row lb-row${r.name === me ? " me" : ""}"><span class="main-col">${medal[i] || `<b class="lb-rank">${i + 1}. </b>`}${esc(r.name)}</span><b>${r.score}<small>${unit}</small></b></div>`
+    ).join("") || `<p class="center-text lb-empty">No scores yet — set the first record!</p>`}
+    ${me ? "" : `<div class="wl-add lb-join-row"><input class="note-area lb-name" maxlength="18" placeholder="Your name to join…" style="min-height:0;padding:6px 8px;flex:1;font-size:11px"/><button class="lib-chip lb-join-btn" style="border-radius:10px">👤 Join</button></div>`}
+    <p class="lb-note">Rankings across all players on this device</p>
+  </div>`;
+}
+function bindBoard(wrap) {
+  wrap.querySelectorAll(".lb-join-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      const inp = b.closest(".lb-join-row").querySelector(".lb-name");
+      if (registerPlayer(inp.value)) {
+        toast(`👋 Welcome, ${currentPlayerName()}!`);
+        renderGrid();
+      }
+    });
+    b.closest(".lb-join-row").querySelector(".lb-name").addEventListener("keydown", (e) => { if (e.key === "Enter") b.click(); });
+  });
+}
+
 const BUILTIN_CATS = {
   general: { label: "Today Summary", icon: "🏠", hint: "Your daily dashboard", widgets: ["todaySummary", "weather", "clock", "quickLinks", "calendar", "notes", "todos", "quote"] },
   sports: { label: "Sports", icon: "⚽", hint: "Live scores, match schedule and league tables", widgets: ["liveScores", "matchSchedule", "leagueTable", "multiScores", "teamFinder"] },
-  finance: { label: "Finance & Crypto", icon: "💰", hint: "Crypto, stocks, gold and currency", widgets: ["cryptoWatchlist", "stocks", "goldCurrency"] },
+  finance: { label: "Finance & Crypto", icon: "💰", hint: "Crypto, stocks, indices, gold, FX and market sentiment", widgets: ["cryptoWatchlist", "stocks", "marketIndices", "goldCurrency", "topMovers", "fearGreed", "currencyConverter"] },
   music: { label: "Music", icon: "🎵", hint: "Player, trending tracks, radio and concerts", widgets: ["nowPlaying", "trendingTracks", "topArtists", "moodMixes", "radio", "concerts"] },
   movies: { label: "Movies & Series", icon: "🎬", hint: "Trending movies & series, watchlist and genres", widgets: ["trendingMovies", "trendingSeries", "watchlist", "genreBrowser"] },
   art: { label: "Art", icon: "🎨", hint: "Artwork of the day, artists and exhibitions", widgets: ["artOfDay", "livingGallery", "artistSpotlight", "colorStories", "exhibitions"] },
-  fun: { label: "Entertainment", icon: "🎮", hint: "Quizzes, games, jokes and mini challenges", widgets: ["dailyJoke", "triviaQuiz", "pollOfDay", "funFacts", "rpsLeague", "higherLower"] },
+  fun: { label: "Entertainment", icon: "🎮", hint: "Arcade games, quizzes, wisdom and daily fun — with leaderboards", widgets: ["dailyJoke", "triviaQuiz", "flagQuiz", "mathBlitz", "memoryMatch", "reactionTest", "rpsLeague", "higherLower", "pollOfDay", "funFacts", "wordOfWisdom"] },
 };
 
 function getCats() {
@@ -117,7 +188,7 @@ const WIDGETS = {
           <div class="sum-card sum-fx"><div class="sc-icon">⚽</div><div class="sc-val"><span class="dot-pulse"></span></div><div class="sc-lbl">Next fixture</div></div>
           <div class="sum-card sum-np"><div class="sc-icon">🎵</div><div class="sc-val np-name">—</div><div class="sc-lbl">Now playing</div></div>
         </div>`);
-      const WX_URL = "https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.006&current=temperature_2m,weather_code&hourly=temperature_2m,weather_code&daily=sunrise,sunset&timezone=auto&forecast_days=2";
+      const WX_URL = "https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.006&current=temperature_2m,weather_code&hourly=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=7";
       getJSON(WX_URL, 30).then((d) => {
         el.querySelector(".sum-wx .sc-val").textContent = Math.round(d.current.temperature_2m) + "°";
         const dayTemps = d.hourly.time.map((t, i) => ({ t, v: d.hourly.temperature_2m[i] })).filter((x) => new Date(x.t).getDate() === new Date().getDate());
@@ -167,21 +238,26 @@ const WIDGETS = {
         61: ["Light rain", "🌧️"], 63: ["Rain", "🌧️"], 65: ["Heavy rain", "⛈️"], 71: ["Light snow", "🌨️"], 73: ["Snow", "🌨️"],
         75: ["Heavy snow", "❄️"], 80: ["Showers", "🌦️"], 81: ["Showers", "🌧️"], 82: ["Violent showers", "⛈️"], 95: ["Thunderstorm", "⛈️"],
       };
-      const url = "https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.006&current=temperature_2m,weather_code&hourly=temperature_2m,weather_code&daily=sunrise,sunset&timezone=auto&forecast_days=2";
+      const url = "https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.006&current=temperature_2m,weather_code&hourly=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=7";
       getJSON(url, 30).then((d) => {
         const cur = d.current;
         const [desc, icon] = WMO[cur.weather_code] || ["—", "🌡️"];
         const hours = [];
-        const nowH = new Date().getHours();
-        let placed = false;
-        for (let i = 0; i < d.hourly.time.length && hours.length < 6; i++) {
+        const nowMs = Date.now();
+        for (let i = 0; i < d.hourly.time.length && hours.length < 24; i++) {
           const h = new Date(d.hourly.time[i]);
-          if (h.getDate() !== new Date().getDate()) continue;
-          if (!placed && h.getHours() < nowH) continue;
-          placed = true;
+          if (h.getTime() + 3600000 <= nowMs) continue;
           const hc = WMO[d.hourly.weather_code[i]] || ["", "·"];
-          hours.push(`<span><small>${String(h.getHours()).padStart(2, "0")}:00</small><em style="font-style:normal">${hc[1]}</em><b>${Math.round(d.hourly.temperature_2m[i])}°</b></span>`);
+          const isNewDay = hours.length > 0 && h.getHours() === 0;
+          const label = hours.length === 0 ? "Now" : String(h.getHours()).padStart(2, "0") + ":00";
+          hours.push(`${isNewDay ? '<span class="wx-day-sep"></span>' : ""}<span><small>${label}</small><em style="font-style:normal">${hc[1]}</em><b>${Math.round(d.hourly.temperature_2m[i])}°</b></span>`);
         }
+        const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+        const week = d.daily.time.map((t, i) => {
+          const dt = new Date(t);
+          const wc = WMO[d.daily.weather_code[i]] || ["", "·"];
+          return `<span${i === 0 ? ' class="today"' : ""}><small>${i === 0 ? "Today" : dayNames[dt.getDay()]}</small><em style="font-style:normal" class="wxd">${wc[1]}</em><b>${Math.round(d.daily.temperature_2m_max[i])}°/${Math.round(d.daily.temperature_2m_min[i])}°</b></span>`;
+        }).join("");
         const dayTemps = d.hourly.time
           .map((t, i) => ({ t, v: d.hourly.temperature_2m[i] }))
           .filter((x) => new Date(x.t).getDate() === new Date().getDate());
@@ -193,7 +269,8 @@ const WIDGETS = {
               <div><span class="wx-temp">${Math.round(cur.temperature_2m)}°</span><p class="wx-desc">${desc}</p></div>
               <div style="font-size:40px;line-height:1">${icon}</div>
             </div>
-            <div class="wx-hours">${hours.join("")}</div>
+            <div class="wx-hours wx-hours-scroll">${hours.join("")}</div>
+            <div class="wx-week">${week}</div>
             <div class="wx-meta"><span>New York</span><span>H: ${hi}° · L: ${lo}°</span></div>
             <div class="wx-meta" style="border:none;padding-top:0;font-size:10px;justify-content:flex-end"><a href="https://open-meteo.com/" target="_blank" style="color:var(--muted);text-decoration:none">ⓘ Open-Meteo</a></div>
           </div>`;
@@ -229,6 +306,13 @@ const WIDGETS = {
         <div class="sun-times">
           <span>☀️<span><small>Sunrise</small><b>06:18</b></span></span>
           <span>🌙<span><small>Sunset</small><b>19:47</b></span></span>
+        </div>
+        <div class="alarm-head">⏰ Alarms <span class="alarm-count"></span></div>
+        <div class="alarm-list"></div>
+        <div class="wl-add alarm-add">
+          <input type="time" class="note-area alarm-time" style="min-height:0;padding:6px 8px;flex:0 0 108px;font-size:12px"/>
+          <input class="note-area alarm-label" placeholder="Label…" style="min-height:0;padding:6px 8px;flex:1;font-size:12px"/>
+          <button class="lib-chip alarm-go" style="border-radius:10px">＋</button>
         </div>`);
       const dig = el.querySelector(".clock-digital strong");
       const hr = el.querySelector(".hand-hour");
@@ -248,6 +332,52 @@ const WIDGETS = {
       };
       tick();
       setInterval(tick, 1000);
+      if (!state.alarms) state.alarms = [];
+      const alarmList = el.querySelector(".alarm-list");
+      const paintAlarms = () => {
+        alarmList.innerHTML = state.alarms.map((a, i) =>
+          `<div class="list-row"><span class="main-col"><b dir="ltr">${a.time}</b>${a.label ? " · " + esc(a.label) : ""}</span><button class="w-action alarm-toggle" data-i="${i}" title="On/Off" style="opacity:${a.enabled ? ".95" : ".4"}">${a.enabled ? "🔔" : "🔕"}</button><button class="w-action alarm-del" data-i="${i}" title="Delete" style="opacity:.5">✕</button></div>`
+        ).join("") || `<p class="center-text" style="padding:2px 0;font-size:11px">No alarms yet — add one below</p>`;
+        el.querySelector(".alarm-count").textContent = state.alarms.length ? `(${state.alarms.filter((a) => a.enabled).length}/${state.alarms.length})` : "";
+        alarmList.querySelectorAll(".alarm-toggle").forEach((b) =>
+          b.addEventListener("click", () => { state.alarms[+b.dataset.i].enabled = !state.alarms[+b.dataset.i].enabled; saveState(); paintAlarms(); })
+        );
+        alarmList.querySelectorAll(".alarm-del").forEach((b) =>
+          b.addEventListener("click", () => { state.alarms.splice(+b.dataset.i, 1); saveState(); paintAlarms(); })
+        );
+      };
+      paintAlarms();
+      const addAlarm = () => {
+        const t = el.querySelector(".alarm-time").value;
+        if (!t) return;
+        state.alarms.push({ time: t, label: el.querySelector(".alarm-label").value.trim(), enabled: true });
+        el.querySelector(".alarm-label").value = "";
+        saveState();
+        paintAlarms();
+      };
+      el.querySelector(".alarm-go").addEventListener("click", addAlarm);
+      const firedKeys = {};
+      setInterval(() => {
+        const n = new Date();
+        const hm = `${String(n.getHours()).padStart(2, "0")}:${String(n.getMinutes()).padStart(2, "0")}`;
+        state.alarms.forEach((a) => {
+          if (!a.enabled || a.time !== hm) return;
+          const key = n.toDateString() + hm + (a.label || "");
+          if (firedKeys[key]) return;
+          firedKeys[key] = true;
+          toast(`⏰ Alarm${a.label ? " — " + a.label : ""} (${a.time})`);
+          try {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            [0, 450, 900].forEach((delay) => {
+              const o = ctx.createOscillator(), g = ctx.createGain();
+              o.connect(g); g.connect(ctx.destination);
+              o.frequency.value = 880; g.gain.value = 0.07;
+              o.start(ctx.currentTime + delay / 1000);
+              o.stop(ctx.currentTime + delay / 1000 + 0.22);
+            });
+          } catch (e) {}
+        });
+      }, 5000);
       return el;
     },
     detail() {
@@ -273,6 +403,88 @@ const WIDGETS = {
       view.setDate(1);
       const strong = el.querySelector("strong");
       const daysBox = el.querySelector(".cal-days");
+      if (!state.occasions) state.occasions = {};
+      const mdKeyOf = (y, m, d) => `${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+      const openDayModal = (y, m, d) => {
+        const mdKey = mdKeyOf(y, m, d);
+        const fullKey = `${y}-${mdKey}`;
+        const dtObj = new Date(y, m, d);
+        const monthShort = dtObj.toLocaleDateString("en-US", { month: "short" });
+        const EMOJIS = ["🎂", "💍", "💒", "🎓", "💐", "🎁", "✈️", "🎉"];
+        const mEl = div(`
+          <div class="occ-hero">
+            <span class="occ-hero-num">${d}</span>
+            <div class="occ-hero-txt"><b>${dtObj.toLocaleDateString("en-US", { weekday: "long" })}</b><small>${dtObj.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</small></div>
+            <span class="occ-count-badge"></span>
+          </div>
+          <div class="occ-list"></div>
+          <div class="occ-form">
+            <div class="occ-emoji-row">
+              ${EMOJIS.map((e2) => `<button type="button" class="occ-emoji-chip${e2 === EMOJIS[0] ? " active" : ""}" data-e="${e2}" title="${e2}">${e2}</button>`).join("")}
+            </div>
+            <input class="occ-title" maxlength="60" placeholder="Name it… e.g. Mom's birthday"/>
+            <div class="occ-seg">
+              <button type="button" class="occ-seg-btn active" data-mode="yearly">🔁 Every year</button>
+              <button type="button" class="occ-seg-btn" data-mode="once">📆 Only in ${y}</button>
+            </div>
+            <button class="lib-chip occ-go">💾 Save occasion</button>
+          </div>`);
+        openModal(`Occasions · ${monthShort} ${d}`, mEl);
+        let emoji = EMOJIS[0];
+        let mode = "yearly";
+        const list = mEl.querySelector(".occ-list");
+        const countBadge = mEl.querySelector(".occ-count-badge");
+        const occRow = (o, key, i, sub) =>
+          `<div class="occ-item"><span class="occ-item-icon">${o.i}</span><span class="occ-item-main"><b>${esc(o.t)}</b><small>${sub}</small></span><button class="occ-del" data-key="${key}" data-i="${i}" title="Delete">✕</button></div>`;
+        const paintOcc = () => {
+          const yearly = state.occasions[mdKey] || [];
+          const once = state.occasions[fullKey] || [];
+          countBadge.textContent = yearly.length + once.length ? `${yearly.length + once.length} saved` : "empty";
+          list.innerHTML =
+            yearly.map((o, i) => occRow(o, mdKey, i, "Repeats every year")).join("") +
+            once.map((o, i) => occRow(o, fullKey, i, `Only ${monthShort} ${d}, ${y}`)).join("") ||
+            `<p class="occ-empty">Nothing saved for this day yet — add your first one below 👇</p>`;
+          list.querySelectorAll(".occ-del").forEach((b) =>
+            b.addEventListener("click", () => {
+              const arr = state.occasions[b.dataset.key] || [];
+              arr.splice(+b.dataset.i, 1);
+              if (!arr.length) delete state.occasions[b.dataset.key];
+              saveState();
+              paintOcc();
+              paint();
+            })
+          );
+        };
+        mEl.querySelectorAll(".occ-emoji-chip").forEach((c) =>
+          c.addEventListener("click", () => {
+            mEl.querySelectorAll(".occ-emoji-chip").forEach((x) => x.classList.remove("active"));
+            c.classList.add("active");
+            emoji = c.dataset.e;
+          })
+        );
+        mEl.querySelectorAll(".occ-seg-btn").forEach((sb) =>
+          sb.addEventListener("click", () => {
+            mEl.querySelectorAll(".occ-seg-btn").forEach((x) => x.classList.remove("active"));
+            sb.classList.add("active");
+            mode = sb.dataset.mode;
+          })
+        );
+        const save = () => {
+          const title = mEl.querySelector(".occ-title").value.trim();
+          if (!title) { mEl.querySelector(".occ-title").focus(); return; }
+          const key = mode === "yearly" ? mdKey : fullKey;
+          if (!state.occasions[key]) state.occasions[key] = [];
+          state.occasions[key].push({ t: title, i: emoji });
+          saveState();
+          mEl.querySelector(".occ-title").value = "";
+          paintOcc();
+          paint();
+          toast(`📌 "${title}" saved`);
+        };
+        mEl.querySelector(".occ-go").addEventListener("click", save);
+        mEl.querySelector(".occ-title").addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+        paintOcc();
+      };
       const paint = () => {
         const y = view.getFullYear(), m = view.getMonth();
         strong.textContent = view.toLocaleDateString("en-US", { month: "long", year: "numeric" });
@@ -283,9 +495,14 @@ const WIDGETS = {
         for (let i = 0; i < firstDow; i++) html += `<span class="cal-empty"></span>`;
         for (let d = 1; d <= count; d++) {
           const isToday = d === today.getDate() && m === today.getMonth() && y === today.getFullYear();
-          html += `<button class="cal-day${isToday ? " today" : ""}">${d}</button>`;
+          const md = mdKeyOf(y, m, d);
+          const hasOcc = !!(state.occasions[md] || state.occasions[`${y}-${md}`]);
+          html += `<button class="cal-day${isToday ? " today" : ""}" data-d="${d}" title="${hasOcc ? "Has occasions — click to view" : "Click to add an occasion"}">${d}${hasOcc ? '<i class="cal-dot"></i>' : ""}</button>`;
         }
         daysBox.innerHTML = html;
+        daysBox.querySelectorAll(".cal-day").forEach((b) =>
+          b.addEventListener("click", () => openDayModal(y, m, +b.dataset.d))
+        );
       };
       el.querySelector(".prev").addEventListener("click", () => { view.setMonth(view.getMonth() - 1); paint(); });
       el.querySelector(".next").addEventListener("click", () => { view.setMonth(view.getMonth() + 1); paint(); });
@@ -392,10 +609,17 @@ const WIDGETS = {
     render() {
       const el = div(loadingHTML("Fetching TheSportsDB…"));
       getJSON("https://www.thesportsdb.com/api/v1/json/3/eventspastleague.php?id=4328", 20).then((d) => {
-        const evs = (d.events || []).slice(0, 6);
-        el.innerHTML = evs.map((e) =>
-          row(`${e.strHomeTeam} — ${e.strAwayTeam}`, `<b dir="ltr">${e.intHomeScore ?? "-"} : ${e.intAwayScore ?? "-"}</b>`)
-        ).join("") || errorHTML("No recent events");
+        const evs = d.events || [];
+        if (!evs.length) { el.innerHTML = errorHTML("No recent events"); return; }
+        const byDay = {};
+        evs.slice(0, 12).forEach((e) => { (byDay[e.dateEvent] = byDay[e.dateEvent] || []).push(e); });
+        el.innerHTML = Object.entries(byDay).map(([day, ms]) =>
+          `<p class="ls-day">${new Date(day + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}${ms[0].intRound ? ` · MW ${ms[0].intRound}` : ""}</p>` +
+          ms.map((e) => row(
+            `<b>${e.strHomeTeam} — ${e.strAwayTeam}</b><small style="display:block;color:var(--muted);font-size:10px">${[e.strTime ? "⏱ " + e.strTime.slice(0, 5) : "", e.strVenue ? "📍 " + esc(e.strVenue) : "", e.intAttendance ? "👥 " + Number(e.intAttendance).toLocaleString("en-US") : ""].filter(Boolean).join(" · ") || "&nbsp;"}</small>`,
+            `<b dir="ltr">${e.intHomeScore ?? "-"} : ${e.intAwayScore ?? "-"}</b>`
+          )).join("")
+        ).join("") + `<p class="center-text" style="margin-top:8px;font-size:10px">thesportsdb.com</p>`;
       }).catch(() => { el.innerHTML = errorHTML("TheSportsDB unreachable"); });
       return el;
     },
@@ -414,25 +638,69 @@ const WIDGETS = {
     render() {
       const el = div(loadingHTML("Fetching TheSportsDB…"));
       getJSON("https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4328", 20).then((d) => {
-        el.innerHTML = (d.events || []).slice(0, 6).map((e) =>
-          row(`${e.strHomeTeam} — ${e.strAwayTeam}`, `${e.strTime || ""} · ${e.dateEvent}`)
-        ).join("") || errorHTML("No upcoming events");
+        const evs = (d.events || []).slice(0, 16);
+        if (!evs.length) { el.innerHTML = errorHTML("No upcoming events"); return; }
+        const byDay = {};
+        evs.forEach((e) => { (byDay[e.dateEvent] = byDay[e.dateEvent] || []).push(e); });
+        el.innerHTML = Object.entries(byDay).map(([day, ms]) =>
+          `<p class="ls-day">${new Date(day + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}${ms[0].intRound ? ` · MW ${ms[0].intRound}` : ""}</p>` +
+          ms.map((e) => row(
+            `${e.strHomeTeam} — ${e.strAwayTeam}`,
+            [e.strTime ? e.strTime.slice(0, 5) : "", e.strVenue ? esc(e.strVenue.split(",")[0]) : ""].filter(Boolean).join(" · ") || "TBD"
+          )).join("")
+        ).join("") + `<p class="center-text" style="margin-top:8px;font-size:10px">thesportsdb.com</p>`;
       }).catch(() => { el.innerHTML = errorHTML("TheSportsDB unreachable"); });
       return el;
     },
   },
   leagueTable: {
-    title: "Premier League Table", icon: "🏆", cat: "sports", size: "m",
+    title: "Top 3 — Big Five Leagues", icon: "🏅", cat: "sports", size: "m",
     render() {
-      const el = div(loadingHTML("Fetching standings…"));
+      const LEAGUES = [["Premier League", 4328], ["La Liga", 4335], ["Serie A", 4332], ["Bundesliga", 4331], ["Ligue 1", 4334]];
+      const MEDALS = ["🥇", "🥈", "🥉"];
+      const wrap = div(`<div class="mood-chips lg-chips"></div><div class="lg-body">${loadingHTML()}</div>`);
+      const box = wrap.querySelector(".lg-body");
+      let active = null;
+      const load = (name, id, season) => {
+        active = id;
+        wrap.querySelectorAll(".mood-chip").forEach((x) => x.classList.toggle("active", x.dataset.id == id));
+        box.innerHTML = loadingHTML(`Fetching ${name} standings…`);
+        getJSON(`https://www.thesportsdb.com/api/v1/json/3/lookuptable.php?l=${id}&s=${season}`, 60).then((d) => {
+          if (!d.table || !d.table.length) throw new Error("empty");
+          box.innerHTML =
+            d.table.slice(0, 3).map((t, i) =>
+              row(
+                `<span style="font-size:15px">${MEDALS[i]}</span> <b>${t.intRank}. ${esc(t.strTeam)}</b><small style="display:block;color:var(--muted);font-size:10px">${t.intPlayed ?? "—"} played · ${t.intWin ?? "—"}W ${t.intDraw ?? "—"}D ${t.intLoss ?? "—"}L</small>`,
+                `<b>${t.intPoints} pts</b><small style="display:block;color:var(--muted);font-size:10px;text-align:right">GD ${t.intGoalDifference > 0 ? "+" : ""}${t.intGoalDifference ?? 0}</small>`
+              )
+            ).join("") +
+            `<p class="center-text" style="margin-top:8px;font-size:10px">${esc(name)} · ${season} · thesportsdb.com</p>`;
+        }).catch(() => {
+          if (season !== "2024-2025") load(name, id, "2024-2025");
+          else box.innerHTML = errorHTML("Standings unavailable");
+        });
+      };
+      LEAGUES.forEach(([name, id]) => {
+        const b = document.createElement("button");
+        b.className = "mood-chip";
+        b.dataset.id = id;
+        b.textContent = name;
+        b.addEventListener("click", () => { if (active !== id) load(name, id, "2025-2026"); });
+        wrap.querySelector(".lg-chips").appendChild(b);
+      });
+      load(LEAGUES[0][0], LEAGUES[0][1], "2025-2026");
+      return wrap;
+    },
+    detail() {
+      const el = div(loadingHTML());
       const load = (season) => getJSON(`https://www.thesportsdb.com/api/v1/json/3/lookuptable.php?l=4328&s=${season}`, 60)
         .then((d) => {
           if (!d.table || !d.table.length) throw new Error("empty");
-          el.innerHTML = d.table.slice(0, 6).map((t) =>
+          el.innerHTML = list(d.table.slice(0, 14).map((t) =>
             row(`${t.intRank}. ${t.strTeam}`, `${t.intPoints} pts · GD ${t.intGoalDifference}`)
-          ).join("") + `<p class="center-text" style="margin-top:8px;font-size:10px">Season ${season} · thesportsdb.com</p>`;
+          )).innerHTML + `<p class="center-text" style="margin-top:8px;font-size:10px">Premier League full table · season ${season}</p>`;
         });
-      load("2025-2026").catch(() => load("2024-2025")).catch(() => { el.innerHTML = errorHTML("Standings unavailable"); });
+      load("2025-2026").catch(() => load("2024-2025")).catch(() => { el.innerHTML = errorHTML(); });
       return el;
     },
   },
@@ -440,7 +708,7 @@ const WIDGETS = {
   multiScores: {
     title: "Scores Across Leagues", icon: "🌍", cat: "sports", size: "m",
     render() {
-      const LEAGUES = [["English PL", 4328], ["NBA", 4387], ["NHL", 4380], ["MLB", 4424]];
+      const LEAGUES = [["English PL", 4328], ["La Liga", 4335], ["Serie A", 4332], ["Bundesliga", 4331], ["Ligue 1", 4334], ["UCL", 4480], ["NBA", 4387], ["NHL", 4380], ["MLB", 4424]];
       const wrap = div(`<div class="mood-chips lg-chips"></div><div class="lg-body">${loadingHTML()}</div>`);
       const box = wrap.querySelector(".lg-body");
       let active = null;
@@ -578,6 +846,105 @@ const WIDGETS = {
     },
   },
 
+  marketIndices: {
+    title: "Global Market Indices", icon: "🌐", cat: "finance", size: "m",
+    render() {
+      const el = div(`<p class="center-text" style="font-size:10.5px;color:var(--muted);padding-bottom:4px">INDICES · delayed quotes</p><div class="stock-box">${loadingHTML("Fetching Yahoo Finance…")}</div>`);
+      const IDX = [["^GSPC", "S&P 500"], ["^IXIC", "Nasdaq"], ["^DJI", "Dow Jones"], ["^FTSE", "FTSE 100"], ["^GDAXI", "DAX"], ["^N225", "Nikkei 225"]];
+      Promise.allSettled(IDX.map(async ([sym, name]) => {
+        const d = await getJSON(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=1mo&interval=1d`, 20, {}, (x) => !!(x && x.chart && x.chart.result && x.chart.result[0] && x.chart.result[0].meta));
+        const r = d.chart.result[0];
+        const m = r.meta;
+        const closes = ((r.indicators.quote || [])[0]?.close || []).filter(Boolean);
+        const prev = m.chartPreviousClose || m.previousClose;
+        const pct = prev ? ((m.regularMarketPrice - prev) / prev) * 100 : 0;
+        return `<div class="market-row"><span class="tick-badge">${esc(name.slice(0, 1))}</span><span class="market-name"><b>${esc(name)}</b><small>${sym} · ${(m.regularMarketPrice ?? 0).toLocaleString("en-US", { maximumFractionDigits: 2 })}</small></span>${closes.length > 3 ? spark(closes, pct >= 0) : ""}<strong class="market-pct ${pct >= 0 ? "gain" : "loss"}">${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%</strong></div>`;
+      })).then((rs) => {
+        const ok = rs.filter((x) => x.status === "fulfilled").map((x) => x.value);
+        el.querySelector(".stock-box").innerHTML = ok.length ? ok.join("") : errorHTML("Yahoo Finance unreachable");
+      });
+      return el;
+    },
+  },
+  topMovers: {
+    title: "Top Movers · 24h", icon: "🚀", cat: "finance", size: "s",
+    render() {
+      const el = div(loadingHTML("Fetching CoinGecko…"));
+      let retried = false;
+      const item = (c) => {
+        const pct = c.price_change_percentage_24h ?? 0;
+        const p = c.current_price ?? 0;
+        return `<div class="market-row"><img src="${c.image}" alt=""/><span class="market-name"><b>${esc(c.symbol.toUpperCase())}</b><small>$${p.toLocaleString("en-US", { maximumFractionDigits: p < 5 ? 4 : 2 })}</small></span><strong class="market-pct ${pct >= 0 ? "gain" : "loss"}">${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%</strong></div>`;
+      };
+      const paint = (rows) => {
+        const sorted = [...rows].sort((a, b) => (b.price_change_percentage_24h ?? -999) - (a.price_change_percentage_24h ?? -999));
+        el.innerHTML =
+          `<p class="lib-group-title" style="margin-top:0">🚀 Top gainers</p>` +
+          sorted.slice(0, 3).map(item).join("") +
+          `<p class="lib-group-title">📉 Top losers</p>` +
+          sorted.slice(-3).reverse().map(item).join("") +
+          `<p class="center-text" style="margin-top:6px;font-size:10px">24h change · top coins</p>`;
+      };
+      const load = () => getJSON("https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&price_change_percentage=24h", 15, {}, Array.isArray).then((rows) => {
+        if (!rows.length) throw new Error("empty");
+        paint(rows);
+      }).catch(() => {
+        if (!retried) { retried = true; el.innerHTML = loadingHTML("CoinGecko busy — retrying…"); setTimeout(load, 3000); return; }
+        getJSON("https://api.coinpaprika.com/v1/tickers?quotes=USD", 15, {}, (d) => Array.isArray(d) && d.length > 50).then((all) => {
+          const MAJORS = ["btc-bitcoin", "eth-ethereum", "sol-solana", "xrp-xrp", "doge-dogecoin", "ada-cardano", "dot-polkadot", "ltc-litecoin"];
+          paint(all.filter((r) => MAJORS.includes(r.id)).map((r) => ({ image: `https://static.coinpaprika.com/coin/${r.id}/logo.png`, symbol: r.symbol, current_price: r.quotes.USD.price, price_change_percentage_24h: r.quotes.USD.percent_change_24h })));
+        }).catch(() => { el.innerHTML = errorHTML("All feeds unreachable"); });
+      });
+      load();
+      return el;
+    },
+  },
+  fearGreed: {
+    title: "Fear & Greed Index", icon: "😱", cat: "finance", size: "s",
+    render() {
+      const el = div(loadingHTML("Fetching alternative.me…"));
+      getJSON("https://api.alternative.me/fng/?limit=8", 60, {}, (d) => !!(d && d.data && d.data.length)).then((d) => {
+        const v = Number(d.data[0].value);
+        el.innerHTML = `
+          <div class="fg-hero">
+            <b class="fg-val ${v >= 60 ? "up" : v <= 40 ? "down" : ""}">${v}</b>
+            <div class="fg-txt"><strong>${esc(d.data[0].value_classification)}</strong><small>Crypto market sentiment · today</small></div>
+          </div>
+          <div class="fg-bars">${d.data.slice().reverse().map((x) => {
+            const val = Number(x.value);
+            return `<i style="height:${Math.max(10, val)}%;background:${val >= 60 ? "var(--gain)" : val <= 40 ? "var(--loss)" : "var(--muted)"}" title="${x.value} · ${x.value_classification}"></i>`;
+          }).join("")}</div>
+          <p class="center-text" style="margin-top:6px;font-size:10px">Last 8 days · alternative.me</p>`;
+      }).catch(() => { el.innerHTML = errorHTML("alternative.me unreachable"); });
+      return el;
+    },
+  },
+  currencyConverter: {
+    title: "Currency Converter", icon: "💱", cat: "finance", size: "s",
+    render() {
+      const CUR = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "TRY", "AED"];
+      const wrap = div(`
+        <div class="cv-row"><input type="number" class="cv-amt" value="100" min="0"/><select class="cv-from">${CUR.map((c) => `<option>${c}</option>`).join("")}</select></div>
+        <button class="cv-swap" title="Swap currencies">⇅</button>
+        <div class="cv-row"><input class="cv-out" readonly/><select class="cv-to">${CUR.map((c) => `<option${c === "EUR" ? " selected" : ""}>${c}</option>`).join("")}</select></div>
+        <p class="center-text cv-rate" style="font-size:10.5px;margin-top:7px;color:var(--muted)"></p>`);
+      const amt = wrap.querySelector(".cv-amt"), from = wrap.querySelector(".cv-from"), to = wrap.querySelector(".cv-to"), out = wrap.querySelector(".cv-out"), rateEl = wrap.querySelector(".cv-rate");
+      let rates = null;
+      const calc = () => {
+        if (!rates) return;
+        const rate = rates[to.value] / rates[from.value];
+        out.value = ((parseFloat(amt.value) || 0) * rate).toLocaleString("en-US", { maximumFractionDigits: 2 });
+        rateEl.textContent = `1 ${from.value} = ${rate.toFixed(4)} ${to.value} · live`;
+      };
+      getJSON("https://open.er-api.com/v6/latest/USD", 120, {}, (d) => !!d?.rates?.EUR).then((d) => { rates = d.rates; calc(); }).catch(() => { rateEl.textContent = "⚠ Rates unavailable"; });
+      amt.addEventListener("input", calc);
+      from.addEventListener("change", calc);
+      to.addEventListener("change", calc);
+      wrap.querySelector(".cv-swap").addEventListener("click", () => { const t = from.value; from.value = to.value; to.value = t; calc(); });
+      return wrap;
+    },
+  },
+
   nowPlaying: {
     title: "Now Playing", icon: "🎧", cat: "music", size: "m",
     render() {
@@ -652,15 +1019,21 @@ const WIDGETS = {
     title: "Mood Mixes", icon: "🌈", cat: "music", size: "s",
     render() {
       const MOODS = {
-        "🎯 Focus": "focus ambient instrumental",
-        "😴 Sleep": "sleep meditation calm",
-        "💪 Workout": "workout gym hits",
-        "🚗 Driving": "road trip rock driving",
+        "🎯 Focus": "focus instrumental study",
+        "😴 Sleep": "sleep ambient calm",
+        "💪 Workout": "workout gym energy",
+        "🚗 Driving": "driving road synthwave",
         "☕ Chill": "chill lofi relaxing",
-        "🎉 Party": "party dance hits",
+        "🎉 Party": "party dance house",
       };
-      const wrap = div(`<div class="mood-chips"></div><p class="center-text np-mood" style="margin-top:8px;font-size:10.5px">Tap a mood — plays real 30s previews via iTunes</p>`);
+      const wrap = div(`<div class="mood-chips"></div><p class="center-text np-mood" style="margin-top:8px;font-size:10.5px">Tap a mood — free full-length tracks via Audius</p>`);
       const box = wrap.querySelector(".mood-chips");
+      const status = wrap.querySelector(".np-mood");
+      let hostPromise = null;
+      const getHost = () => {
+        if (!hostPromise) hostPromise = getJSON("https://api.audius.co", 1440, {}, (d) => !!(d && d.data && d.data.length)).then((d) => d.data[0]);
+        return hostPromise;
+      };
       Object.keys(MOODS).forEach((m) => {
         const b = document.createElement("button");
         b.className = "mood-chip";
@@ -668,15 +1041,24 @@ const WIDGETS = {
         b.addEventListener("click", async () => {
           box.querySelectorAll(".mood-chip").forEach((x) => x.classList.remove("active"));
           b.classList.add("active");
-          wrap.querySelector(".np-mood").textContent = `Loading ${m} mix…`;
+          status.textContent = `Loading ${m} mix…`;
           try {
-            const d = await getJSON(`https://itunes.apple.com/search?term=${encodeURIComponent(MOODS[m])}&entity=song&limit=8`, 60);
-            const tracks = (d.results || []).map(itunesTrack).filter((t) => t.preview);
+            const host = await getHost();
+            const d = await getJSON(`${host}/v1/tracks/search?query=${encodeURIComponent(MOODS[m])}&app_name=Nexora`, 60, {}, (x) => !!x?.data);
+            const tracks = (d.data || [])
+              .filter((t) => t.is_streamable !== false && (t.duration || 0) >= 90 && t.user && !t.user.is_deactivated)
+              .slice(0, 8)
+              .map((t) => ({
+                name: t.title,
+                artist: t.user.name,
+                art: (t.artwork && (t.artwork["480x480"] || t.artwork["150x150"])) || "",
+                preview: `${host}/v1/tracks/${t.id}/stream?app_name=Nexora`,
+              }));
             if (!tracks.length) throw new Error("empty");
             playQueue(tracks, 0);
-            wrap.querySelector(".np-mood").textContent = `${m} mix loaded — ${tracks.length} tracks`;
+            status.textContent = `${m} mix loaded — ${tracks.length} FULL tracks via Audius`;
           } catch (e) {
-            wrap.querySelector(".np-mood").textContent = "⚠ Could not load this mix";
+            status.textContent = "⚠ Could not load this mix";
           }
         });
         box.appendChild(b);
@@ -688,41 +1070,86 @@ const WIDGETS = {
     title: "Live Radio", icon: "📻", cat: "music", size: "m",
     render() {
       const GENRES = ["Pop", "Rock", "Jazz", "Classical", "Electronic", "Hip Hop", "News"];
-      const wrap = div(`<div class="mood-chips"></div><p class="center-text np-radio" style="margin:6px 0;font-size:10.5px;color:var(--muted)">Pick a genre — thousands of real stations via radio-browser.info</p><div class="radio-body">${loadingHTML()}</div>`);
+      const MIRRORS = ["https://de1.api.radio-browser.info", "https://nl1.api.radio-browser.info", "https://at1.api.radio-browser.info", "https://fi1.api.radio-browser.info"];
+      const wrap = div(`<div class="mood-chips"></div><p class="center-text np-radio" style="margin:6px 0;font-size:10.5px;color:var(--muted)">Pick a genre — thousands of real stations via radio-browser.info</p><div class="radio-body">${loadingHTML()}</div><div class="rd-vol">🔊<input type="range" class="rd-vol-range" min="0" max="100" value="80"/></div>`);
       const box = wrap.querySelector(".mood-chips");
       const body = wrap.querySelector(".radio-body");
       const np = wrap.querySelector(".np-radio");
-      if (!RADIO.audio) { RADIO.audio = new Audio(); }
+      const vol = wrap.querySelector(".rd-vol-range");
+      if (!RADIO.audio) { RADIO.audio = new Audio(); RADIO.audio.preload = "none"; }
       let stations = [];
-      const stop = () => { RADIO.audio.pause(); RADIO.playingId = null; };
-      const play = (st, rowEl) => {
-        if (RADIO.playingId === st.stationuuid) { stop(); np.textContent = "Paused · " + st.name.slice(0, 40); return; }
-        stop();
-        RADIO.audio.src = st.url_resolved;
-        RADIO.audio.play().then(() => {
+      const stop = () => { RADIO.audio.pause(); RADIO.audio.removeAttribute("src"); RADIO.playingId = null; };
+      const setRowIcons = (playingId) => {
+        wrap.querySelectorAll(".radio-row").forEach((r) => r.querySelector(".np-mini").textContent = r.dataset.id === playingId ? "⏸" : "▶");
+      };
+      const fail = (st, triesLeft) => {
+        RADIO.playingId = null;
+        setRowIcons(null);
+        const idx = stations.findIndex((x) => x.stationuuid === st.stationuuid);
+        if (triesLeft > 0 && stations.length > 1) {
+          const next = stations[(idx + 1) % stations.length];
+          np.textContent = "⚠ Station offline — trying another…";
+          setTimeout(() => connect(next, triesLeft - 1), 500);
+        } else {
+          np.textContent = "⚠ Couldn't connect — pick another station";
+          toast("📻 This station didn't respond");
+        }
+      };
+      const connect = (st, triesLeft) => {
+        const rowEl = wrap.querySelector(`.radio-row[data-id="${st.stationuuid}"]`);
+        if (rowEl) rowEl.querySelector(".np-mini").textContent = "…";
+        np.textContent = "📡 Connecting: " + st.name.trim().slice(0, 40);
+        const a = RADIO.audio;
+        let settled = false;
+        const finish = () => { settled = true; clearTimeout(timer); a.removeEventListener("error", onErr); };
+        const timer = setTimeout(() => { if (!settled) { a.pause(); finish(); fail(st, triesLeft); } }, 12000);
+        const onErr = () => { if (!settled) { finish(); fail(st, triesLeft); } };
+        a.addEventListener("error", onErr, { once: true });
+        a.src = st.url_resolved || st.url;
+        a.volume = vol.value / 100;
+        a.play().then(() => {
+          if (settled) return;
+          finish();
           RADIO.playingId = st.stationuuid;
-          np.textContent = "🔴 Now: " + st.name.slice(0, 44);
-          wrap.querySelectorAll(".radio-row").forEach((r) => r.querySelector(".np-mini").textContent = "▶");
-          rowEl.querySelector(".np-mini").textContent = "⏸";
-        }).catch(() => toast("Stream unavailable right now"));
+          np.textContent = "🔴 Now: " + st.name.trim().slice(0, 44);
+          setRowIcons(RADIO.playingId);
+        }).catch(() => {
+          if (settled) return;
+          finish();
+          fail(st, triesLeft);
+        });
       };
       const paint = () => {
         body.innerHTML = stations.map((s) =>
           `<div class="market-row radio-row" data-id="${s.stationuuid}" style="cursor:pointer"><span class="tick-badge">📻</span><span class="market-name"><b>${esc(s.name.trim().slice(0, 30))}</b><small>${esc(s.country || "")} · ${esc(s.bitrate || "?")}kbps</small></span><span class="np-mini">▶</span></div>`
-        ).join("") || errorHTML("No stations found");
+        ).join("") || errorHTML("No working stations found — try another genre");
         body.querySelectorAll(".radio-row").forEach((rEl) => {
           rEl.addEventListener("click", () => {
             const st = stations.find((x) => x.stationuuid === rEl.dataset.id);
-            if (st) play(st, rEl);
+            if (!st) return;
+            if (RADIO.playingId === st.stationuuid) {
+              stop();
+              np.textContent = "⏸ Paused · " + st.name.trim().slice(0, 36);
+              setRowIcons(null);
+              return;
+            }
+            stop();
+            connect(st, 2);
           });
         });
       };
       const load = (genre) => {
         body.innerHTML = loadingHTML(`Tuning ${genre} stations…`);
-        getJSON(`https://de1.api.radio-browser.info/json/stations/bytag/${encodeURIComponent(genre.toLowerCase())}?limit=8&hidebroken=true&order=votes&reverse=true`, 60, {}, (d) => Array.isArray(d)).then((list) => {
-          stations = list.filter((s) => (s.url_resolved || "").startsWith("https://")).slice(0, 6);
+        const tryMirror = async (i) => {
+          if (i >= MIRRORS.length) throw new Error("all mirrors unreachable");
+          try {
+            return await getJSON(`${MIRRORS[i]}/json/stations/bytag/${encodeURIComponent(genre.toLowerCase())}?limit=14&hidebroken=true&order=votes&reverse=true`, 60, {}, (d) => Array.isArray(d));
+          } catch (e) { return tryMirror(i + 1); }
+        };
+        tryMirror(0).then((list) => {
+          stations = list.filter((s) => (s.url_resolved || s.url || "").startsWith("https://")).slice(0, 6);
           paint();
-        }).catch(() => { body.innerHTML = errorHTML("Radio browser unreachable"); });
+        }).catch(() => { body.innerHTML = errorHTML("Radio directory unreachable"); });
       };
       GENRES.forEach((g) => {
         const b = document.createElement("button");
@@ -732,11 +1159,15 @@ const WIDGETS = {
           box.querySelectorAll(".mood-chip").forEach((x) => x.classList.remove("active"));
           b.classList.add("active");
           stop();
+          np.textContent = "Pick a station ↓";
           load(g);
         });
         box.appendChild(b);
       });
+      vol.addEventListener("input", () => { RADIO.audio.volume = vol.value / 100; });
       window.addEventListener("beforeunload", stop);
+      box.querySelector(".mood-chip").classList.add("active");
+      load(GENRES[0]);
       return wrap;
     },
   },
@@ -784,9 +1215,9 @@ const WIDGETS = {
     title: "Browse by Genre", icon: "🎭", cat: "movies", size: "m",
     render() {
       const GENRES = [
-        ["Action & Adventure", 4401], ["Comedy", 4403], ["Drama", 4405],
-        ["Horror", 4417], ["Sci-Fi & Fantasy", 4419], ["Thriller", 4421],
-        ["Romance", 4423], ["Documentary", 4468],
+        ["Action & Adventure", 4401], ["Comedy", 4404], ["Drama", 4406],
+        ["Horror", 4408], ["Sci-Fi & Fantasy", 4413], ["Thriller", 4416],
+        ["Romance", 4412], ["Documentary", 4405],
       ];
       const palette = ["#ff6b6b", "#5b7cfa", "#f4a915", "#9b6cff", "#455a64", "#ff8fab", "#45c4a0", "#d96ba0"];
       const el = div(
@@ -849,29 +1280,43 @@ const WIDGETS = {
     title: "Artwork of the Day — The Met", icon: "🖼️", cat: "art", size: "m",
     render() {
       const el = div(loadingHTML("Fetching The Met collection…"));
-      getJSON("https://collectionapi.metmuseum.org/public/collection/v1/search?isHighlight=true&hasImages=true&q=painting", 720).then((s) => {
-        const id = s.objectIDs[Math.floor(Date.now() / 86400000) % s.objectIDs.length];
-        return getJSON(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`, 1440);
-      }).then((o) => {
+      const fill = (o) => {
+        const img = el.querySelector(".art-img");
+        if (img) {
+          img.style.display = o.primaryImageSmall ? "" : "none";
+          if (o.primaryImageSmall) img.src = o.primaryImageSmall;
+        }
+        el.querySelector(".quote-box").innerHTML =
+          `«${decodeEntities(o.title)}»` +
+          `<span class="quote-author">${decodeEntities(o.artistDisplayName || "Unknown")} · ${o.objectDate || ""}</span>` +
+          (o.medium ? `<span class="quote-author">${decodeEntities(o.medium)}</span>` : "");
+        el.querySelector(".art-meta").textContent = [decodeEntities(o.dimensions || ""), o.GalleryNumber ? "Gallery " + o.GalleryNumber : ""].filter(Boolean).join(" · ");
+        el.querySelector(".art-src").href = o.objectURL || "#";
+      };
+      metPick("painting", 0).then((o) => {
         el.innerHTML = `
-          ${o.primaryImageSmall ? `<img class="art-img" src="${o.primaryImageSmall}" alt="" style="width:100%;height:auto;border-radius:12px;margin-bottom:8px;object-fit:contain"/>` : ""}
-          <div class="quote-box" style="padding-top:4px">«${decodeEntities(o.title)}»<span class="quote-author">${decodeEntities(o.artistDisplayName || "Unknown")} · ${o.objectDate || ""}</span></div>
+          <img class="art-img" src="" alt="" style="width:100%;height:auto;max-height:300px;border-radius:12px;margin-bottom:8px;object-fit:contain"/>
+          <div class="quote-box" style="padding-top:4px"></div>
+          <p class="art-meta center-text" style="font-size:10.5px;color:var(--muted);margin-top:5px"></p>
           <div style="display:flex;gap:6px;margin-top:6px">
             <input class="note-area art-search" placeholder="Search artwork or artist at The Met…" style="min-height:0;padding:8px 10px;flex:1;font-size:12px"/>
             <button class="lib-chip art-go" style="border-radius:10px">🔍</button>
           </div>
-          <p class="center-text" style="margin-top:6px;font-size:10px">Today's pick · metmuseum.org open access</p>`;
+          <p class="center-text" style="margin-top:6px;font-size:10px"><a class="art-src" href="#" target="_blank" style="color:var(--muted)">view at metmuseum.org ↗</a> · open access</p>`;
+        fill(o);
         const runSearch = async () => {
           const q = el.querySelector(".art-search").value.trim();
           if (!q) return;
-          const img = el.querySelector(".art-img");
           try {
             const s = await getJSON(`https://collectionapi.metmuseum.org/public/collection/v1/search?hasImages=true&q=${encodeURIComponent(q)}`, 5);
             if (!s.objectIDs?.length) { toast("No results at The Met"); return; }
-            const pick = s.objectIDs[Math.floor(Math.random() * Math.min(12, s.objectIDs.length))];
-            const o2 = await getJSON(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${pick}`, 1440);
-            if (img) { img.src = o2.primaryImageSmall || img.src; img.style.display = o2.primaryImageSmall ? "" : "none"; }
-            el.querySelector(".quote-box").innerHTML = `«${decodeEntities(o2.title)}»<span class="quote-author">${decodeEntities(o2.artistDisplayName || "Unknown")} · ${o2.objectDate || ""}</span>`;
+            let o2 = null;
+            for (let i = 0; i < 4 && !o2?.primaryImageSmall; i++) {
+              const pickId = s.objectIDs[Math.floor(Math.random() * Math.min(12, s.objectIDs.length))];
+              o2 = await getJSON(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${pickId}`, 1440);
+            }
+            if (o2) { fill(o2); toast("🖼️ New artwork loaded"); }
+            else toast("No image results at The Met");
           } catch (e) { toast("Met search failed"); }
         };
         el.querySelector(".art-go").addEventListener("click", runSearch);
@@ -884,13 +1329,12 @@ const WIDGETS = {
     title: "Artist Spotlight", icon: "🖌️", cat: "art", size: "m",
     render() {
       const el = div(loadingHTML("Fetching The Met collection…"));
-      getJSON("https://collectionapi.metmuseum.org/public/collection/v1/search?isHighlight=true&hasImages=true&q=portrait", 720).then((s) => {
-        const id = s.objectIDs[Math.floor((Date.now() / 86400000 + 3) % s.objectIDs.length)];
-        return getJSON(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`, 1440);
-      }).then((o) => {
+      metPick("portrait", 3).then((o) => {
         el.innerHTML = `
-          <div class="quote-box"><b>${decodeEntities(o.artistDisplayName || "Unknown artist")}</b><span class="quote-author">«${decodeEntities(o.title)}» · ${o.objectDate || ""} · ${o.medium || ""}</span></div>
-          <p class="center-text" style="font-size:10px">Source: The Metropolitan Museum of Art (open access)</p>`;
+          ${o.primaryImageSmall ? `<img class="art-img" src="${o.primaryImageSmall}" alt="" style="width:100%;height:auto;max-height:280px;border-radius:12px;margin-bottom:8px;object-fit:contain"/>` : ""}
+          <div class="quote-box"><b>${decodeEntities(o.artistDisplayName || "Unknown artist")}</b><span class="quote-author">«${decodeEntities(o.title)}» · ${o.objectDate || ""} · ${decodeEntities(o.medium || "")}</span></div>
+          <p class="center-text" style="font-size:10.5px;color:var(--muted);margin-top:5px">${[decodeEntities(o.dimensions || ""), o.GalleryNumber ? "Gallery " + o.GalleryNumber : ""].filter(Boolean).join(" · ")}</p>
+          <p class="center-text" style="margin-top:6px;font-size:10px"><a href="${o.objectURL}" target="_blank" style="color:var(--muted)">view at metmuseum.org ↗</a> · open access</p>`;
       }).catch(() => { el.innerHTML = errorHTML("The Met unreachable"); });
       return el;
     },
@@ -911,19 +1355,31 @@ const WIDGETS = {
     title: "Daily Palette", icon: "🌈", cat: "art", size: "s",
     render() {
       const daySeed = Math.floor(Date.now() / 86400000);
-      const seedHexes = ["2461A7", "E85D75", "7A9E7E", "F2A104", "6C5CE7"];
-      const modes = ["analogic", "monochrome", "triad", "complement"];
-      const seedHex = seedHexes[daySeed % seedHexes.length];
-      const mode = modes[daySeed % modes.length];
-      const el = div(loadingHTML("Mixing today's palette…"));
-      getJSON(`https://www.thecolorapi.com/scheme?hex=${seedHex}&mode=${mode}&count=5&format=json`, 720, {}, (d) => !!d?.colors?.length).then((d) => {
-        el.innerHTML = `<div class="swatches palette-day">` + d.colors.map((c) =>
-          `<div class="swatch" style="background:${c.hex.value}" title="${c.hex.clean} — click to copy"><span>${c.hex.clean}</span></div>`
-        ).join("") + `</div><p class="center-text" style="margin-top:6px;font-size:10px">thecolorapi.com · ${mode}</p>`;
+      const SEEDS = ["2461A7", "E85D75", "7A9E7E", "F2A104", "6C5CE7", "0FA3B1", "D64550", "8E7DBE", "F4ACB7", "3D5A80", "EE964B", "29335C", "94D2BD", "E4572E", "76B041", "B388EB"];
+      const MODES = ["analogic", "monochrome", "triad", "complement", "quad"];
+      const el = div(loadingHTML("Mixing today's palettes…"));
+      Promise.allSettled(
+        Array.from({ length: 8 }, (_, i) => {
+          const mode = MODES[(daySeed + i) % MODES.length];
+          return getJSON(`https://www.thecolorapi.com/scheme?hex=${SEEDS[(daySeed + i * 5) % SEEDS.length]}&mode=${mode}&count=5&format=json`, 720, {}, (d) => !!d?.colors?.length)
+            .then((d) => ({ mode, colors: d.colors }))
+            .catch(() => null);
+        })
+      ).then((rs) => {
+        const ok = rs.map((x) => x.status === "fulfilled" ? x.value : null).filter(Boolean);
+        if (!ok.length) { el.innerHTML = errorHTML("The Color API unreachable"); return; }
+        el.innerHTML = ok.map((p, i) =>
+          `<div class="palette-card"><small class="pal-mode">${p.mode} · palette ${i + 1}</small><div class="swatches">${p.colors.map((c) =>
+            `<div class="swatch" style="background:${c.hex.value}" title="${c.hex.clean} — click to copy"><span>${c.hex.clean}</span></div>`
+          ).join("")}</div></div>`
+        ).join("") + `<p class="center-text" style="margin-top:8px;font-size:10px">${ok.length} fresh palettes daily · thecolorapi.com</p>`;
         el.querySelectorAll(".swatch").forEach((sw) =>
-          sw.addEventListener("click", () => navigator.clipboard?.writeText("#" + sw.querySelector("span").textContent))
+          sw.addEventListener("click", () => {
+            navigator.clipboard?.writeText("#" + sw.querySelector("span").textContent);
+            toast("📋 #" + sw.querySelector("span").textContent + " copied");
+          })
         );
-      }).catch(() => { el.innerHTML = errorHTML("The Color API unreachable"); });
+      });
       return el;
     },
   },
@@ -958,6 +1414,245 @@ const WIDGETS = {
       return el;
     },
   },
+  wordOfWisdom: {
+    title: "Wise Words", icon: "🦉", cat: "fun", size: "s",
+    render() {
+      const el = div(loadingHTML());
+      const FALLBACK = [
+        ["Do not wait to strike till the iron is hot; but make it hot by striking.", "— William Butler Yeats"],
+        ["Well begun is half done.", "— Aristotle"],
+        ["We suffer more often in imagination than in reality.", "— Seneca"],
+      ];
+      const paintBtn = () => {
+        const b = document.createElement("button");
+        b.className = "lib-chip ww-more";
+        b.style.cssText = "display:block;margin:8px auto 0;border-radius:10px";
+        b.textContent = "🔄 Another one";
+        b.addEventListener("click", load);
+        el.appendChild(b);
+      };
+      const load = () => {
+        el.innerHTML = loadingHTML();
+        getJSON(`https://api.adviceslip.com/advice?t=${Date.now()}`, 1, {}, (d) => !!d?.slip?.advice).then((d) => {
+          el.innerHTML = `<div class="quote-box">${decodeEntities(d.slip.advice)}<span class="quote-author">advice #${d.slip.id} · adviceslip.com</span></div>`;
+          paintBtn();
+        }).catch(() => {
+          const q = pick(FALLBACK);
+          el.innerHTML = `<div class="quote-box">${q[0]}<span class="quote-author">${q[1]} · offline</span></div>`;
+          paintBtn();
+        });
+      };
+      load();
+      return el;
+    },
+  },
+  flagQuiz: {
+    title: "Guess the Flag", icon: "🚩", cat: "fun", size: "s",
+    render() {
+      const FLAGS = [["🇯🇵", "Japan"], ["🇧🇷", "Brazil"], ["🇫🇷", "France"], ["🇪🇬", "Egypt"], ["🇮🇳", "India"], ["🇰🇪", "Kenya"], ["🇨🇦", "Canada"], ["🇩🇪", "Germany"], ["🇦🇺", "Australia"], ["🇲🇽", "Mexico"], ["🇮🇹", "Italy"], ["🇰🇷", "South Korea"], ["🇳🇬", "Nigeria"], ["🇦🇷", "Argentina"], ["🇹🇷", "Türkiye"], ["🇸🇪", "Sweden"], ["🇿🇦", "South Africa"], ["🇮🇩", "Indonesia"], ["🇳🇱", "Netherlands"], ["🇸🇦", "Saudi Arabia"], ["🇨🇭", "Switzerland"], ["🇵🇹", "Portugal"], ["🇬🇷", "Greece"], ["🇻🇳", "Vietnam"], ["🇵🇱", "Poland"], ["🇮🇷", "Iran"], ["🇪🇸", "Spain"], ["🇨🇱", "Chile"], ["🇲🇦", "Morocco"], ["🇹🇭", "Thailand"], ["🇮🇪", "Ireland"], ["🇺🇦", "Ukraine"]];
+      const ROUNDS = 8;
+      const el = div(`<div class="fq-wrap"></div>`);
+      const box = el.querySelector(".fq-wrap");
+      let qi = 0, score = 0, correct = null;
+      const ask = () => {
+        correct = pick(FLAGS);
+        const opts = [correct];
+        while (opts.length < 4) { const c = pick(FLAGS); if (!opts.some((o) => o[1] === c[1])) opts.push(c); }
+        opts.sort(() => Math.random() - 0.5);
+        box.innerHTML = `
+          <p class="center-text" style="font-size:11px;color:var(--muted)">Round ${qi + 1}/${ROUNDS} · Score <b>${score}</b></p>
+          <div class="fq-flag">${correct[0]}</div>
+          <div class="fq-opts">${opts.map((o) => `<button class="lib-chip fq-opt" data-n="${esc(o[1])}">${esc(o[1])}</button>`).join("")}</div>`;
+        box.querySelectorAll(".fq-opt").forEach((b) =>
+          b.addEventListener("click", () => {
+            if (b.disabled) return;
+            box.querySelectorAll(".fq-opt").forEach((x) => {
+              x.disabled = true;
+              if (x.dataset.n === correct[1]) x.style.borderColor = "var(--gain)";
+            });
+            if (b.dataset.n === correct[1]) { score++; }
+            else b.style.borderColor = "var(--loss)";
+            setTimeout(() => {
+              qi++;
+              if (qi < ROUNDS) ask(); else end();
+            }, 750);
+          })
+        );
+      };
+      const end = () => {
+        submitScore("flagquiz", score);
+        box.innerHTML = `
+          <div class="quote-box"><b>🏁 Finished!</b><span class="quote-author">Score ${score}/${ROUNDS}</span></div>
+          ${boardHTML("flagquiz", "/8")}
+          <button class="lib-chip fq-again" style="display:block;margin:8px auto 0;border-radius:10px">🔁 Play again</button>`;
+        bindBoard(box);
+        box.querySelector(".fq-again").addEventListener("click", start);
+      };
+      const start = () => { qi = 0; score = 0; ask(); };
+      start();
+      return el;
+    },
+  },
+  mathBlitz: {
+    title: "Math Blitz · 30s", icon: "🧮", cat: "fun", size: "s",
+    render() {
+      const el = div(`<div class="mb-wrap"></div>`);
+      const box = el.querySelector(".mb-wrap");
+      let timer = null, tLeft = 30, score = 0, ans = 0;
+      const ri = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+      const stop = () => { if (timer) clearInterval(timer); timer = null; };
+      const nextQ = () => {
+        const op = pick(["+", "−", "×"]);
+        let a, b, r;
+        if (op === "+") { a = ri(6, 60); b = ri(6, 60); r = a + b; }
+        else if (op === "−") { a = ri(12, 90); b = ri(3, a - 2); r = a - b; }
+        else { a = ri(2, 9); b = ri(3, 9); r = a * b; }
+        ans = r;
+        box.querySelector(".mb-q").textContent = `${a} ${op} ${b} = ?`;
+        const inp = box.querySelector(".mb-in");
+        inp.value = "";
+        inp.focus();
+      };
+      const check = () => {
+        const inp = box.querySelector(".mb-in");
+        if (!inp || !timer) return;
+        if (parseInt(inp.value, 10) === ans) score += 5;
+        else { score = Math.max(0, score - 2); tLeft = Math.max(1, tLeft - 2); }
+        box.querySelector(".mb-s").textContent = score;
+        box.querySelector(".mb-t").textContent = tLeft;
+        nextQ();
+      };
+      const end = () => {
+        stop();
+        submitScore("mathblitz", score);
+        box.innerHTML = `
+          <div class="quote-box"><b>⏱ Time's up!</b><span class="quote-author">Final score ${score}</span></div>
+          ${boardHTML("mathblitz")}
+          <button class="lib-chip mb-go" style="display:block;margin:8px auto 0;border-radius:10px">🔁 Again</button>`;
+        bindBoard(box);
+        box.querySelector(".mb-go").addEventListener("click", start);
+      };
+      const start = () => {
+        stop();
+        score = 0; tLeft = 30;
+        box.innerHTML = `
+          <div class="mb-hud"><span>⏱ <b class="mb-t">30</b>s</span><small>+5 ✓ &nbsp; −2 ✗ &amp; −2s</small><span>⭐ <b class="mb-s">0</b></span></div>
+          <div class="mb-q mb-q-big"></div>
+          <input class="note-area mb-in" type="number" inputmode="numeric" placeholder="Answer…" style="min-height:0;padding:8px 10px;width:100%;font-size:14px;text-align:center"/>
+          <p class="center-text" style="font-size:10px;color:var(--muted);margin-top:4px">Type &amp; press Enter — fast!</p>`;
+        nextQ();
+        box.querySelector(".mb-in").addEventListener("keydown", (e) => { if (e.key === "Enter") check(); });
+        timer = setInterval(() => {
+          tLeft--;
+          const tEl = box.querySelector(".mb-t");
+          if (tEl) tEl.textContent = tLeft;
+          if (tLeft <= 0) end();
+        }, 1000);
+      };
+      start();
+      return el;
+    },
+  },
+  memoryMatch: {
+    title: "Memory Match", icon: "🃏", cat: "fun", size: "s",
+    render() {
+      const EMOJI = ["🍎", "🌟", "🐼", "🎈", "🎸", "🌵", "🚀", "🐙"];
+      const el = div(`<div class="mm-wrap"></div>`);
+      const box = el.querySelector(".mm-wrap");
+      let tick = null;
+      const start = () => {
+        let first = null, lock = false, moves = 0, matched = 0, secs = 0;
+        if (tick) clearInterval(tick);
+        tick = setInterval(() => { secs++; const s = box.querySelector(".mm-tm"); if (s) s.textContent = secs; }, 1000);
+        const deck = [...EMOJI, ...EMOJI].sort(() => Math.random() - 0.5);
+        box.innerHTML = `
+          <p class="center-text mm-hud" style="font-size:11px;color:var(--muted);padding-bottom:6px">Moves <b class="mm-mv">0</b> · ⏱ <b class="mm-tm">0</b>s · find all 8 pairs!</p>
+          <div class="mem-grid">${deck.map((e2) => `<button class="mem-card" data-e="${e2}"><span class="mem-front">❔</span><span class="mem-back">${e2}</span></button>`).join("")}</div>`;
+        const finish = () => {
+          clearInterval(tick); tick = null;
+          const sc = Math.max(10, 200 - moves * 5 - secs * 2);
+          submitScore("memorymatch", sc);
+          const p = document.createElement("div");
+          p.innerHTML = `<div class="quote-box"><b>🎉 Cleared!</b><span class="quote-author">${moves} moves · ${secs}s → Score ${sc}</span></div>${boardHTML("memorymatch")}<button class="lib-chip mm-again" style="display:block;margin:8px auto 0;border-radius:10px">🔁 Again</button>`;
+          while (p.firstChild) box.appendChild(p.firstChild);
+          bindBoard(box);
+          box.querySelector(".mm-again").addEventListener("click", start);
+        };
+        box.querySelectorAll(".mem-card").forEach((c) =>
+          c.addEventListener("click", () => {
+            if (lock || c.classList.contains("open") || c.classList.contains("done")) return;
+            c.classList.add("open");
+            if (!first) { first = c; return; }
+            moves++;
+            box.querySelector(".mm-mv").textContent = moves;
+            const a = first, b2 = c;
+            first = null;
+            if (a.dataset.e === b2.dataset.e) {
+              a.classList.add("done"); b2.classList.add("done");
+              matched++;
+              if (matched === EMOJI.length) finish();
+            } else {
+              lock = true;
+              setTimeout(() => { a.classList.remove("open"); b2.classList.remove("open"); lock = false; }, 650);
+            }
+          })
+        );
+      };
+      start();
+      return el;
+    },
+  },
+  reactionTest: {
+    title: "Reaction Test", icon: "⚡", cat: "fun", size: "s",
+    render() {
+      const el = div(`<div class="rt-wrap"></div>`);
+      const box = el.querySelector(".rt-wrap");
+      const ROUNDS = 5;
+      let times = [];
+      const start = () => {
+        times = [];
+        let phase = "ready", to = null, t0 = 0;
+        box.innerHTML = `
+          <p class="center-text" style="font-size:11px;color:var(--muted);padding-bottom:6px">Round <b class="rt-round">0/${ROUNDS}</b> · click only on GREEN</p>
+          <div class="rt-pad ready">Click to begin round</div>
+          <p class="center-text" style="font-size:10px;color:var(--muted);margin-top:5px">Faster reaction → more points</p>`;
+        const pad = box.querySelector(".rt-pad");
+        const roundEl = box.querySelector(".rt-round");
+        const setPad = (cls, txt) => { pad.className = "rt-pad " + cls; pad.textContent = txt; };
+        const arm = () => {
+          phase = "wait";
+          setPad("wait", "Wait for GREEN…");
+          to = setTimeout(() => { t0 = performance.now(); phase = "go"; setPad("go", "CLICK!"); }, 900 + Math.random() * 1800);
+        };
+        pad.addEventListener("click", () => {
+          if (phase === "ready") arm();
+          else if (phase === "wait") { clearTimeout(to); toast("Too early! 😅"); arm(); }
+          else if (phase === "go") {
+            const ms = Math.round(performance.now() - t0);
+            times.push(ms);
+            roundEl.textContent = `${times.length}/${ROUNDS}`;
+            phase = "ready";
+            setPad("ready", `${ms} ms — click for next round`);
+            if (times.length >= ROUNDS) setTimeout(finish, 600);
+          }
+        });
+      };
+      const finish = () => {
+        const avg = Math.round(times.reduce((a, b) => a + b, 0) / times.length);
+        const pts = Math.max(0, Math.round((600 - avg) * 2));
+        submitScore("reaction", pts);
+        box.innerHTML = `
+          <div class="quote-box"><b>⚡ Average ${avg} ms</b><span class="quote-author">${times.join(" · ")} ms → ${pts} pts</span></div>
+          ${boardHTML("reaction")}
+          <button class="lib-chip rt-go" style="display:block;margin:8px auto 0;border-radius:10px">🔁 Play again</button>`;
+        bindBoard(box);
+        box.querySelector(".rt-go").addEventListener("click", start);
+      };
+      start();
+      return el;
+    },
+  },
+
   dailyJoke: {
     title: "Joke of the Day", icon: "😂", cat: "fun", size: "s",
     render() {
@@ -1006,10 +1701,13 @@ const WIDGETS = {
       const paintEnd = () => {
         const best = Math.max(score, state.triviaBest || 0);
         state.triviaBest = best;
+        submitScore("trivia", score);
         saveState();
         wrap.innerHTML = `
           <div class="quote-box"><b>Round complete!</b><span class="quote-author">Score ${score}/${qs.length} · Best ${best}/10</span></div>
+          ${boardHTML("trivia", "/10")}
           <button class="lib-chip trivia-again" style="display:block;margin:10px auto 0;border-radius:10px">🔄 New round</button>`;
+        bindBoard(wrap);
         wrap.querySelector(".trivia-again").addEventListener("click", start);
       };
       const start = () => {
@@ -1083,12 +1781,14 @@ const WIDGETS = {
       if (!state.rps) state.rps = { w: 0, l: 0, t: 0, streak: 0, bestStreak: 0 };
       const MOVES = [["✊", "Rock"], ["✋", "Paper"], ["✌️", "Scissors"]];
       const BEATS = { Rock: "Scissors", Paper: "Rock", Scissors: "Paper" };
-      const wrap = div(`<div class="rps-score"></div><div class="mood-chips rps-btns"></div><p class="center-text rps-msg" style="margin-top:8px;font-size:11.5px;min-height:30px">Choose your move — build the longest streak!</p>`);
+      const wrap = div(`<div class="rps-score"></div><div class="mood-chips rps-btns"></div><p class="center-text rps-msg" style="margin-top:8px;font-size:11.5px;min-height:30px">Choose your move — build the longest streak!</p><div class="lb-slot"></div>`);
       const scoreBox = wrap.querySelector(".rps-score");
       const msg = wrap.querySelector(".rps-msg");
       const paintScore = () => {
         const r = state.rps;
         scoreBox.innerHTML = `<p class="center-text" style="font-size:10.5px;color:var(--muted);padding-top:4px">W ${r.w} · L ${r.l} · T ${r.t} · Streak ${r.streak} 🔥 Best ${r.bestStreak}</p>`;
+        wrap.querySelector(".lb-slot").innerHTML = boardHTML("rps-streak", "🔥");
+        bindBoard(wrap);
       };
       MOVES.forEach(([emoji, name]) => {
         const b = document.createElement("button");
@@ -1103,6 +1803,7 @@ const WIDGETS = {
           } else if (BEATS[name] === cName) {
             r.w++; r.streak++;
             r.bestStreak = Math.max(r.bestStreak, r.streak);
+            submitScore("rps-streak", r.bestStreak);
             msg.textContent = `${emoji} beats ${cEm} — you win! 🔥 Streak ${r.streak}`;
           } else {
             r.l++; r.streak = 0;
@@ -1158,7 +1859,12 @@ const WIDGETS = {
               setTimeout(nextPair, 900);
             } else {
               msg.textContent = `❌ Wrong! Final score ${score} · Best ${state.hlBest || 0}`;
+              submitScore("higherlower", score);
               wrap.querySelectorAll(".hl-btn").forEach((x) => (x.disabled = true));
+              const boardWrap = document.createElement("div");
+              boardWrap.innerHTML = boardHTML("higherlower");
+              while (boardWrap.firstChild) wrap.appendChild(boardWrap.firstChild);
+              bindBoard(wrap);
               const again = document.createElement("button");
               again.className = "lib-chip";
               again.style.cssText = "display:block;margin:8px auto 0;border-radius:10px";
@@ -1252,10 +1958,37 @@ async function jwPopular(type, genreId) {
 function jwCard(it) {
   return mediaCard(it);
 }
+function addToWatchlistPrompt(it) {
+  const year = ((it.title || "") + " " + (it.artist || "")).match(/\b(19|20)\d{2}\b/)?.[0] || "";
+  const mEl = div(`
+    <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+      ${it.img ? `<img src="${it.img}" alt="" style="width:52px;height:78px;object-fit:cover;border-radius:10px"/>` : ""}
+      <div><b style="font-size:14px">${esc(it.title)}</b>${it.artist ? `<small style="display:block;color:var(--muted);font-size:11px;margin-top:3px">${esc(it.artist)}</small>` : ""}</div>
+    </div>
+    <button class="lib-chip wl-confirm" style="width:100%;justify-content:center;font-weight:600">🔖 Add to my Watchlist</button>`);
+  openModal("Add to Watchlist", mEl);
+  mEl.querySelector(".wl-confirm").addEventListener("click", () => {
+    if (state.watchlist.some((w) => w.name === it.title)) { toast("Already in your Watchlist ✓"); return; }
+    state.watchlist.push({ name: it.title, year, link: it.link || "#" });
+    saveState();
+    toast(`🔖 "${it.title}" saved to Watchlist`);
+    document.querySelector("#modalRoot .modal-close")?.click();
+  });
+}
 function jwTrending(type) {
   const el = div(loadingHTML("Fetching Apple charts…"));
   jwPopular(type)
-    .then((items) => { el.innerHTML = items.map((it, i) => mediaCard(it, i)).join(""); })
+    .then((items) => {
+      el.innerHTML = items.map((it, i) => mediaCard(it, i)).join("") +
+        `<p class="center-text" style="margin-top:8px;font-size:10px">💡 Tip: right-click any title to add it to your Watchlist</p>`;
+      el.addEventListener("contextmenu", (e) => {
+        const card = e.target.closest(".market-row");
+        if (!card) return;
+        e.preventDefault();
+        const idx = [...el.querySelectorAll(".market-row")].indexOf(card);
+        if (idx >= 0 && items[idx]) addToWatchlistPrompt(items[idx]);
+      });
+    })
     .catch(() => { el.innerHTML = errorHTML("Apple charts unreachable"); });
   return el;
 }
@@ -1315,9 +2048,16 @@ function openGenreModal(genreId, genreName) {
       const items = (d.feed.entry || []).map(appleGenreEntry);
       if (!items.length) throw new Error("empty");
       m.innerHTML = `<div class="jw-grid">` + items.map((it) => mediaCard(it)).join("") + `</div>
-        <p class="center-text" style="margin-top:8px;font-size:10px">Official Apple movie charts · itunes.apple.com</p>`;
+        <p class="center-text" style="margin-top:8px;font-size:10px">💡 Right-click any title to add it to your Watchlist · Official Apple charts</p>`;
+      m.addEventListener("contextmenu", (e) => {
+        const card = e.target.closest(".market-row");
+        if (!card) return;
+        e.preventDefault();
+        const idx = [...m.querySelectorAll(".market-row")].indexOf(card);
+        if (idx >= 0 && items[idx]) addToWatchlistPrompt(items[idx]);
+      });
     })
-    .catch(() => { m.innerHTML = errorHTML("Apple charts unreachable"); });
+    .catch(() => { m.innerHTML = errorHTML(`No ${genreName} titles found right now`); });
 }
 
 /* ---------- Music player engine (iTunes 30s previews) ---------- */
@@ -1348,7 +2088,7 @@ function ensureAudio() {
         f.style.width = (MUSIC.audio.duration ? (MUSIC.audio.currentTime / MUSIC.audio.duration) * 100 : 0) + "%";
       });
       document.querySelectorAll(".np-time").forEach((tEl) => {
-        tEl.textContent = `${fmtTime(MUSIC.audio.currentTime)} / ${fmtTime(MUSIC.audio.duration || 30)}${MUSIC.name ? " — " + MUSIC.name : ""}`;
+        tEl.textContent = `${fmtTime(MUSIC.audio.currentTime)} / ${fmtTime(MUSIC.audio.duration || 0)}${MUSIC.name ? " — " + MUSIC.name : ""}`;
       });
     });
   }
@@ -1356,7 +2096,7 @@ function ensureAudio() {
 }
 function fmtTime(s) {
   s = Math.max(0, Math.round(s || 0));
-  return `0:${String(s % 60).padStart(2, "0")}`;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 function playQueue(tracks, start = 0) {
   MUSIC.queue = tracks;
