@@ -154,7 +154,8 @@ function bindBoard(wrap) {
 
 const BUILTIN_CATS = {
   general: { label: "Today Summary", icon: "🏠", hint: "Your daily dashboard", widgets: ["todaySummary", "weather", "clock", "quickLinks", "calendar", "notes", "todos", "quote"] },
-  sports: { label: "Sports", icon: "⚽", hint: "Live scores, match schedule and league tables", widgets: ["liveScores", "matchSchedule", "leagueTable", "multiScores", "teamFinder"] },
+  sports: { label: "Sports", icon: "⚽", hint: "Live scores, match schedule, league tables, F1 & NBA", sub: ["football", "f1", "basketball"],
+    widgets: ["liveScores", "matchSchedule", "leagueTable", "multiScores", "teamFinder", "f1Standings", "f1ConstructorStandings", "f1Schedule", "f1Results", "f1TeamFinder", "nbaStandings", "nbaSchedule", "nbaScores", "nbaPlayers", "nbaTeamFinder"] },
   finance: { label: "Finance & Crypto", icon: "💰", hint: "Crypto, stocks, indices, gold, FX and market sentiment", widgets: ["cryptoWatchlist", "stocks", "marketIndices", "goldCurrency", "topMovers", "fearGreed", "currencyConverter"] },
   music: { label: "Music", icon: "🎵", hint: "Player, trending tracks, radio and concerts", widgets: ["nowPlaying", "trendingTracks", "topArtists", "moodMixes", "radio", "concerts"] },
   movies: { label: "Movies & Series", icon: "🎬", hint: "Trending movies & series, watchlist and genres", widgets: ["trendingMovies", "trendingSeries", "watchlist", "genreBrowser"] },
@@ -244,19 +245,27 @@ const WIDGETS = {
         const [desc, icon] = WMO[cur.weather_code] || ["—", "🌡️"];
         const hours = [];
         const nowMs = Date.now();
-        for (let i = 0; i < d.hourly.time.length && hours.length < 24; i++) {
+        for (let i = 0; i < d.hourly.time.length && hours.length < 7; i++) {
           const h = new Date(d.hourly.time[i]);
           if (h.getTime() + 3600000 <= nowMs) continue;
+          if (h.getHours() % 2 !== 0 && hours.length > 0) continue;
           const hc = WMO[d.hourly.weather_code[i]] || ["", "·"];
-          const isNewDay = hours.length > 0 && h.getHours() === 0;
           const label = hours.length === 0 ? "Now" : String(h.getHours()).padStart(2, "0") + ":00";
-          hours.push(`${isNewDay ? '<span class="wx-day-sep"></span>' : ""}<span><small>${label}</small><em style="font-style:normal">${hc[1]}</em><b>${Math.round(d.hourly.temperature_2m[i])}°</b></span>`);
+          const temp = Math.round(d.hourly.temperature_2m[i]);
+          let lo = temp, hi = temp;
+          for (let j = i; j < Math.min(i + 2, d.hourly.time.length); j++) {
+            const v = Math.round(d.hourly.temperature_2m[j]);
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+          }
+          const tempStr = lo === hi ? `${temp}°` : `<span class="wx-hi">${hi}°</span><span class="wx-lo">${lo}°</span>`;
+          hours.push(`<span class="wx-hour"><small>${label}</small><em style="font-style:normal">${hc[1]}</em><b class="wx-hour-temps">${tempStr}</b></span>`);
         }
         const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
         const week = d.daily.time.map((t, i) => {
           const dt = new Date(t);
           const wc = WMO[d.daily.weather_code[i]] || ["", "·"];
-          return `<span${i === 0 ? ' class="today"' : ""}><small>${i === 0 ? "Today" : dayNames[dt.getDay()]}</small><em style="font-style:normal" class="wxd">${wc[1]}</em><b>${Math.round(d.daily.temperature_2m_max[i])}°/${Math.round(d.daily.temperature_2m_min[i])}°</b></span>`;
+          return `<span${i === 0 ? ' class="today"' : ""}><small>${i === 0 ? "Today" : dayNames[dt.getDay()]}</small><em style="font-style:normal" class="wxd">${wc[1]}</em><span class="wx-day-temps"><span class="wx-hi">${Math.round(d.daily.temperature_2m_max[i])}°</span><span class="wx-lo">${Math.round(d.daily.temperature_2m_min[i])}°</span></span></span>`;
         }).join("");
         const dayTemps = d.hourly.time
           .map((t, i) => ({ t, v: d.hourly.temperature_2m[i] }))
@@ -267,12 +276,10 @@ const WIDGETS = {
           <div class="weather">
             <div class="wx-top">
               <div><span class="wx-temp">${Math.round(cur.temperature_2m)}°</span><p class="wx-desc">${desc}</p></div>
-              <div style="font-size:40px;line-height:1">${icon}</div>
+              <div style="font-size:40px;line-height:1;display:flex;align-items:flex-start;gap:4px">${icon}<a href="https://open-meteo.com/" target="_blank" style="font-size:11px;color:var(--muted);text-decoration:none;margin-top:4px" title="Open-Meteo">ℹ️</a></div>
             </div>
-            <div class="wx-hours wx-hours-scroll">${hours.join("")}</div>
+            <div class="wx-hours">${hours.join("")}</div>
             <div class="wx-week">${week}</div>
-            <div class="wx-meta"><span>New York</span><span>H: ${hi}° · L: ${lo}°</span></div>
-            <div class="wx-meta" style="border:none;padding-top:0;font-size:10px;justify-content:flex-end"><a href="https://open-meteo.com/" target="_blank" style="color:var(--muted);text-decoration:none">ⓘ Open-Meteo</a></div>
           </div>`;
       }).catch(() => { el.innerHTML = errorHTML("Open-Meteo unreachable"); });
       return el;
@@ -563,6 +570,95 @@ const WIDGETS = {
   quickLinks: {
     title: "Quick Links", icon: "🔗", cat: "general", size: "m",
     render() {
+      const PLATFORMS = {
+        Gmail: { color: "#EA4335", icon: "✉️", ctx: [
+          { l: "Inbox", i: "📥", u: "https://mail.google.com/mail/u/0/#inbox" },
+          { l: "Compose", i: "✏️", u: "https://mail.google.com/mail/u/0/#inbox?compose=new" },
+          { l: "Drafts", i: "📝", u: "https://mail.google.com/mail/u/0/#drafts" },
+          { l: "Sent", i: "📤", u: "https://mail.google.com/mail/u/0/#sent" },
+          { l: "Starred", i: "⭐", u: "https://mail.google.com/mail/u/0/#starred" },
+          { l: "Spam", i: "⚠️", u: "https://mail.google.com/mail/u/0/#spam" },
+        ]},
+        Drive: { color: "#FBBC04", icon: "📂", ctx: [
+          { l: "My Drive", i: "💾", u: "https://drive.google.com/drive/my-drive" },
+          { l: "Shared with me", i: "👥", u: "https://drive.google.com/drive/shared-with-me" },
+          { l: "Recent", i: "🕐", u: "https://drive.google.com/drive/recent" },
+          { l: "Starred", i: "⭐", u: "https://drive.google.com/drive/starred" },
+          { l: "Trash", i: "🗑️", u: "https://drive.google.com/drive/trash" },
+        ]},
+        GitHub: { color: "#24292E", icon: "🐙", ctx: [
+          { l: "Repositories", i: "📦", u: "https://github.com" },
+          { l: "Pull Requests", i: "🔀", u: "https://github.com/pulls" },
+          { l: "Issues", i: "🐛", u: "https://github.com/issues" },
+          { l: "Gists", i: "📄", u: "https://gist.github.com" },
+          { l: "Marketplace", i: "🏪", u: "https://github.com/marketplace" },
+        ]},
+        YouTube: { color: "#FF0000", icon: "▶️", ctx: [
+          { l: "Home", i: "🏠", u: "https://youtube.com" },
+          { l: "Trending", i: "🔥", u: "https://youtube.com/feed/trending" },
+          { l: "Subscriptions", i: "📺", u: "https://youtube.com/feed/subscriptions" },
+          { l: "Library", i: "📚", u: "https://youtube.com/feed/library" },
+          { l: "History", i: "🕐", u: "https://youtube.com/feed/history" },
+          { l: "Liked Videos", i: "👍", u: "https://youtube.com/playlist?list=LL" },
+        ]},
+        Spotify: { color: "#1DB954", icon: "🎵", ctx: [
+          { l: "Home", i: "🏠", u: "https://open.spotify.com" },
+          { l: "Search", i: "🔍", u: "https://open.spotify.com/search" },
+          { l: "Your Library", i: "📚", u: "https://open.spotify.com/collection" },
+          { l: "Liked Songs", i: "💚", u: "https://open.spotify.com/collection/tracks" },
+          { l: "Recently Played", i: "🕐", u: "https://open.spotify.com/recently-played" },
+        ]},
+        LinkedIn: { color: "#0A66C2", icon: "💼", ctx: [
+          { l: "Feed", i: "📰", u: "https://linkedin.com/feed" },
+          { l: "My Network", i: "🤝", u: "https://linkedin.com/mynetwork" },
+          { l: "Jobs", i: "💼", u: "https://linkedin.com/jobs" },
+          { l: "Messaging", i: "💬", u: "https://linkedin.com/messaging" },
+          { l: "Notifications", i: "🔔", u: "https://linkedin.com/notifications" },
+        ]},
+        X: { color: "#000000", icon: "𝕏", ctx: [
+          { l: "Home", i: "🏠", u: "https://x.com/home" },
+          { l: "Explore", i: "🔍", u: "https://x.com/explore" },
+          { l: "Notifications", i: "🔔", u: "https://x.com/notifications" },
+          { l: "Bookmarks", i: "🔖", u: "https://x.com/i/bookmarks" },
+          { l: "Lists", i: "📋", u: "https://x.com/i/lists" },
+          { l: "Profile", i: "👤", u: "https://x.com/settings/profile" },
+        ]},
+        Reddit: { color: "#FF4500", icon: "🤖", ctx: [
+          { l: "Home", i: "🏠", u: "https://reddit.com" },
+          { l: "Popular", i: "🔥", u: "https://reddit.com/r/popular" },
+          { l: "All", i: "🌍", u: "https://reddit.com/r/all" },
+          { l: "Saved", i: "🔖", u: "https://reddit.com/user/me/saved" },
+          { l: "Messages", i: "💬", u: "https://reddit.com/message/inbox" },
+        ]},
+        Notion: { color: "#000000", icon: "📝", ctx: [
+          { l: "Home", i: "🏠", u: "https://notion.so" },
+          { l: "My Workspace", i: "💼", u: "https://notion.so" },
+          { l: "Templates", i: "📋", u: "https://notion.so/templates" },
+          { l: "Inbox", i: "📥", u: "https://notion.so/notifications" },
+          { l: "Settings", i: "⚙️", u: "https://notion.so/settings" },
+        ]},
+        Figma: { color: "#A259FF", icon: "🎨", ctx: [
+          { l: "Recent Files", i: "📁", u: "https://figma.com/recent" },
+          { l: "Drafts", i: "📄", u: "https://figma.com/drafts" },
+          { l: "Community", i: "🌍", u: "https://figma.com/community" },
+          { l: "Plugins", i: "🧩", u: "https://figma.com/plugins" },
+          { l: "Teams", i: "👥", u: "https://figma.com/teams" },
+        ]},
+        Slack: { color: "#4A154B", icon: "💬", ctx: [
+          { l: "Home", i: "🏠", u: "https://slack.com/signin" },
+          { l: "DMs", i: "✉️", u: "https://slack.com/signin" },
+          { l: "Channels", i: "📢", u: "https://slack.com/signin" },
+          { l: "Activity", i: "🔔", u: "https://slack.com/signin" },
+          { l: "More", i: "⋯", u: "https://slack.com/signin" },
+        ]},
+        Dropbox: { color: "#0061FF", icon: "📦", ctx: [
+          { l: "All Files", i: "📂", u: "https://dropbox.com/home" },
+          { l: "Shared", i: "👥", u: "https://dropbox.com/shared" },
+          { l: "Starred", i: "⭐", u: "https://dropbox.com/starred" },
+          { l: "Recent", i: "🕐", u: "https://dropbox.com/recent" },
+          { l: "Deleted", i: "🗑️", u: "https://dropbox.com/deleted" },
+        ]},
+      };
       const links = [
         { n: "Gmail", i: "https://api.iconify.design/logos/google-gmail.svg", u: "https://mail.google.com" },
         { n: "Drive", i: "https://api.iconify.design/logos/google-drive.svg", u: "https://drive.google.com" },
@@ -577,11 +673,46 @@ const WIDGETS = {
         { n: "Reddit", i: "https://api.iconify.design/logos/reddit-icon.svg", u: "https://reddit.com" },
         { n: "Dropbox", i: "https://api.iconify.design/logos/dropbox.svg", u: "https://dropbox.com" },
       ];
-      return div(
+      const wrap = div(
         `<div class="quick-links-grid">` +
-          links.map((l) => `<a class="provider-tile" href="${l.u}" target="_blank"><span class="provider-logo"><img src="${l.i}" alt="${l.n}"/></span><small>${l.n}</small></a>`).join("") +
+          links.map((l) => `<a class="provider-tile" href="${l.u}" target="_blank" data-ctx='${l.n}'><span class="provider-logo"><img src="${l.i}" alt="${l.n}"/></span><small>${l.n}</small></a>`).join("") +
         `</div>`
       );
+      wrap.querySelectorAll(".provider-tile").forEach((tile) => {
+        tile.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          const platform = tile.dataset.ctx;
+          const pData = PLATFORMS[platform];
+          if (!pData || !pData.ctx.length) return;
+          closeCtxMenu();
+          const menu = document.createElement("div");
+          menu.className = "ctx-menu";
+          menu.style.position = "fixed";
+          menu.style.left = e.clientX + "px";
+          menu.style.top = e.clientY + "px";
+          menu.style.zIndex = "9999";
+          const header = document.createElement("div");
+          header.className = "ctx-header";
+          header.style.cssText = `padding:8px 14px;font-weight:800;font-size:12px;border-bottom:2px solid ${pData.color};color:${pData.color};display:flex;align-items:center;gap:6px`;
+          header.innerHTML = `<span style="font-size:16px">${pData.icon}</span> ${platform}`;
+          menu.appendChild(header);
+          pData.ctx.forEach((item) => {
+            const btn = document.createElement("a");
+            btn.className = "ctx-item";
+            btn.href = item.u;
+            btn.target = "_blank";
+            btn.innerHTML = `<span class="ctx-icon">${item.i}</span><span class="ctx-label">${item.l}</span>`;
+            btn.addEventListener("click", () => closeCtxMenu());
+            menu.appendChild(btn);
+          });
+          document.body.appendChild(menu);
+          const rect = menu.getBoundingClientRect();
+          if (rect.right > window.innerWidth) menu.style.left = (e.clientX - rect.width) + "px";
+          if (rect.bottom > window.innerHeight) menu.style.top = (e.clientY - rect.height) + "px";
+          document.addEventListener("click", closeCtxMenu, { once: true });
+        });
+      });
+      return wrap;
     },
   },
   quote: {
@@ -748,16 +879,254 @@ const WIDGETS = {
           const d = await getJSON(`https://www.thesportsdb.com/api/v1/json/3/searchteams.php?t=${encodeURIComponent(q)}`, 60);
           const t = (d.teams || [])[0];
           if (!t) { body.innerHTML = errorHTML("No team found"); return; }
+          const socialLinks = [];
+          if (t.strFacebook) socialLinks.push(`<a href="https://facebook.com/${esc(t.strFacebook)}" target="_blank" class="social-icon" title="Facebook"><svg width="16" height="16" viewBox="0 0 24 24" fill="#1877F2"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg></a>`);
+          if (t.strTwitter) socialLinks.push(`<a href="https://x.com/${esc(t.strTwitter)}" target="_blank" class="social-icon" title="X"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>`);
+          if (t.strInstagram) socialLinks.push(`<a href="https://instagram.com/${esc(t.strInstagram)}" target="_blank" class="social-icon" title="Instagram"><svg width="16" height="16" viewBox="0 0 24 24"><defs><linearGradient id="ig" x1="0" y1="24" x2="24" y2="0"><stop offset="0%" stop-color="#feda75"/><stop offset="25%" stop-color="#fa7e1e"/><stop offset="50%" stop-color="#d62976"/><stop offset="75%" stop-color="#962fbf"/><stop offset="100%" stop-color="#4f5bd5"/></linearGradient></defs><rect width="24" height="24" rx="6" fill="url(#ig)"/><circle cx="12" cy="12" r="4.5" fill="none" stroke="#fff" stroke-width="1.8"/><circle cx="17.5" cy="6.5" r="1.3" fill="#fff"/></svg></a>`);
+          if (t.strWebsite) socialLinks.push(`<a href="${esc(t.strWebsite.startsWith('http') ? t.strWebsite : 'https://' + t.strWebsite)}" target="_blank" class="social-icon" title="Website"><svg width="16" height="16" viewBox="0 0 24 24" fill="#6B7280"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg></a>`);
+          const keywords = t.strKeywords ? t.strKeywords.split(",").slice(0, 3).map((k) => `<span class="tf-keywords">${esc(k.trim())}</span>`).join(" ") : "";
           body.innerHTML = `
-            <div style="display:flex;align-items:center;gap:10px;padding:6px 2px 8px">
-              ${t.strBadge ? `<img src="${t.strBadge}" alt="" style="width:44px;height:44px;object-fit:contain"/>` : ""}
-              <div><b style="font-size:14px">${esc(t.strTeam)}</b><small style="display:block;color:var(--muted);font-size:11px">${esc(t.strLeague || "")} · ${esc(t.intFormedYear || "?")}</small></div>
+            ${t.strBanner ? `<div style="width:calc(100% + 12px);margin:-6px -6px 0;height:80px;background:url(${t.strBanner}) center/cover;border-radius:var(--gd-radius) var(--gd-radius) 0 0"></div>` : ""}
+            <div style="display:flex;align-items:center;gap:10px;padding:8px 2px 4px">
+              ${t.strBadge ? `<img src="${t.strBadge}" alt="" class="tf-badge" style="width:52px;height:52px;object-fit:contain"/>` : ""}
+              <div style="flex:1;min-width:0"><b style="font-size:15px">${esc(t.strTeam)}</b><small style="display:block;color:var(--muted);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.strLeague || "")} · Est. ${esc(t.intFormedYear || "?")}</small></div>
             </div>
-            ${row("Stadium", esc(t.strStadium || "—"))}
-            ${row("Capacity", t.intStadiumCapacity ? Number(t.intStadiumCapacity).toLocaleString("en-US") : "—")}
-            ${row("Location", esc(t.strLocation || "—"))}
-            <p class="center-text" style="margin-top:6px;font-size:10px">thesportsdb.com</p>`;
+            <div class="tf-info-grid">
+              ${t.strStadium ? `<div class="tf-info-item"><span>🏟️ ${esc(t.strStadium)}</span><span>${t.intStadiumCapacity ? Number(t.intStadiumCapacity).toLocaleString("en-US") : ""}</span></div>` : ""}
+              ${t.strLocation ? `<div class="tf-info-item"><span>📍 ${esc(t.strLocation)}</span><span>${esc(t.strCountry || "")}</span></div>` : ""}
+              ${t.strGender ? `<div class="tf-info-item"><span>⚽ ${esc(t.strGender || "—")}</span><span></span></div>` : ""}
+              ${t.strLeague2 ? `<div class="tf-info-item"><span>🏆 ${esc(t.strLeague2)}</span><span></span></div>` : ""}
+            </div>
+            ${keywords ? `<div style="display:flex;flex-wrap:wrap;gap:4px;padding:4px 0 2px">${keywords}</div>` : ""}
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 0 2px">
+              <span style="font-size:9px;color:var(--muted)">thesportsdb.com</span>
+              <div style="display:flex;gap:8px">${socialLinks.join("")}</div>
+            </div>`;
         } catch (e) { body.innerHTML = errorHTML("TheSportsDB unreachable"); }
+      };
+      wrap.querySelector(".tf-go").addEventListener("click", run);
+      wrap.querySelector(".tf-input").addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+      return wrap;
+    },
+  },
+
+  f1Standings: {
+    title: "F1 Drivers Standings", icon: "🏎️", cat: "sports", sub: "f1", size: "m",
+    render() {
+      const el = div(loadingHTML("Loading F1 standings…"));
+      getJSON("https://api.jolpi.ca/ergast/f1/current/driverStandings.json", 300).then((d) => {
+        const list = d.MRData.StandingsTable.StandingsLists[0]?.DriverStandings || [];
+        el.innerHTML = `<div class="league-table"><table><thead><tr><th>#</th><th>Driver</th><th>Team</th><th>Pts</th></tr></thead><tbody>` +
+          list.slice(0, 6).map((s, i) => `<tr><td>${s.position}</td><td>${esc(s.Driver.givenName + " " + s.Driver.familyName)}</td><td>${esc(s.Constructors[0]?.name || "—")}</td><td><b>${s.points}</b></td></tr>`).join("") +
+          `</tbody></table></div>`;
+      }).catch(() => { el.innerHTML = errorHTML("F1 API unreachable"); });
+      return el;
+    },
+  },
+
+  f1ConstructorStandings: {
+    title: "F1 Constructors", icon: "🏭", cat: "sports", sub: "f1", size: "m",
+    render() {
+      const el = div(loadingHTML("Loading constructor standings…"));
+      getJSON("https://api.jolpi.ca/ergast/f1/current/constructorStandings.json", 300).then((d) => {
+        const list = d.MRData.StandingsTable.StandingsLists[0]?.ConstructorStandings || [];
+        el.innerHTML = `<div class="league-table"><table><thead><tr><th>#</th><th>Constructor</th><th>Nationality</th><th>Pts</th></tr></thead><tbody>` +
+          list.slice(0, 6).map((s) => `<tr><td>${s.position}</td><td><b>${esc(s.Constructor.name)}</b></td><td>${esc(s.Constructor.nationality || "—")}</td><td><b>${s.points}</b></td></tr>`).join("") +
+          `</tbody></table></div>`;
+      }).catch(() => { el.innerHTML = errorHTML("F1 API unreachable"); });
+      return el;
+    },
+  },
+
+  f1Schedule: {
+    title: "F1 Schedule", icon: "📅", cat: "sports", sub: "f1", size: "m",
+    render() {
+      const el = div(loadingHTML("Loading F1 schedule…"));
+      getJSON("https://api.jolpi.ca/ergast/f1/current.json", 300).then((d) => {
+        const races = d.MRData.RaceTable.Races || [];
+        el.innerHTML = `<div class="league-table"><table><thead><tr><th>Round</th><th>Grand Prix</th><th>Circuit</th><th>Date</th></tr></thead><tbody>` +
+          races.slice(0, 6).map((r) => `<tr><td>${r.round}</td><td><b>${esc(r.raceName)}</b></td><td>${esc(r.Circuit.circuitName)}</td><td>${r.date}</td></tr>`).join("") +
+          `</tbody></table></div>`;
+      }).catch(() => { el.innerHTML = errorHTML("F1 API unreachable"); });
+      return el;
+    },
+  },
+
+  f1Results: {
+    title: "F1 Latest Results", icon: "🏆", cat: "sports", sub: "f1", size: "m",
+    render() {
+      const el = div(loadingHTML("Loading latest F1 results…"));
+      getJSON("https://api.jolpi.ca/ergast/f1/current/last/results.json", 300).then((d) => {
+        const results = d.MRData.RaceTable.Races[0]?.Results || [];
+        const raceName = d.MRData.RaceTable.Races[0]?.raceName || "Last Race";
+        el.innerHTML = `<p style="font-weight:700;margin:0 0 6px;font-size:13px">${esc(raceName)}</p><div class="league-table"><table><thead><tr><th>#</th><th>Driver</th><th>Team</th><th>Time</th></tr></thead><tbody>` +
+          results.slice(0, 6).map((r) => `<tr><td>${r.position}</td><td>${esc(r.Driver.givenName + " " + r.Driver.familyName)}</td><td>${esc(r.Constructor.name)}</td><td>${r.Time?.time || r.status}</td></tr>`).join("") +
+          `</tbody></table></div>`;
+      }).catch(() => { el.innerHTML = errorHTML("F1 API unreachable"); });
+      return el;
+    },
+  },
+
+  f1TeamFinder: {
+    title: "F1 Team Finder", icon: "🔍", cat: "sports", sub: "f1", size: "m",
+    render() {
+      const wrap = div(`<div class="wl-add"><input class="note-area tf-input" placeholder="Search F1 team (e.g. Red Bull)…" style="min-height:0;padding:8px 10px;flex:1;font-size:12px"/><button class="lib-chip tf-go" style="border-radius:10px">🔍</button></div><div class="tf-body"><p class="center-text" style="padding:8px 0">Search any Formula 1 team</p></div>`);
+      const body = wrap.querySelector(".tf-body");
+      const run = async () => {
+        const q = wrap.querySelector(".tf-input").value.trim();
+        if (!q) return;
+        body.innerHTML = loadingHTML("Searching F1 teams…");
+        try {
+          const d = await getJSON(`https://api.jolpi.ca/ergast/f1/current/constructors.json`, 60);
+          const constructors = d.MRData.ConstructorTable.Constructors || [];
+          const found = constructors.find((c) => c.name.toLowerCase().includes(q.toLowerCase()));
+          if (!found) { body.innerHTML = errorHTML("No F1 team found"); return; }
+          const sd = await getJSON(`https://www.thesportsdb.com/api/v1/json/3/searchteams.php?t=${encodeURIComponent(found.name)}`, 60);
+          const t = (sd.teams || [])[0];
+          const socialLinks = [];
+          if (t?.strInstagram) socialLinks.push(`<a href="https://instagram.com/${esc(t.strInstagram)}" target="_blank" class="social-icon" title="Instagram"><svg width="16" height="16" viewBox="0 0 24 24"><defs><linearGradient id="ig" x1="0" y1="24" x2="24" y2="0"><stop offset="0%" stop-color="#feda75"/><stop offset="25%" stop-color="#fa7e1e"/><stop offset="50%" stop-color="#d62976"/><stop offset="75%" stop-color="#962fbf"/><stop offset="100%" stop-color="#4f5bd5"/></linearGradient></defs><rect width="24" height="24" rx="6" fill="url(#ig)"/><circle cx="12" cy="12" r="4.5" fill="none" stroke="#fff" stroke-width="1.8"/><circle cx="17.5" cy="6.5" r="1.3" fill="#fff"/></svg></a>`);
+          if (t?.strFacebook) socialLinks.push(`<a href="https://facebook.com/${esc(t.strFacebook)}" target="_blank" class="social-icon" title="Facebook"><svg width="16" height="16" viewBox="0 0 24 24" fill="#1877F2"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg></a>`);
+          if (t?.strTwitter) socialLinks.push(`<a href="https://x.com/${esc(t.strTwitter)}" target="_blank" class="social-icon" title="X"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>`);
+          const colors = t ? [t.strColour1, t.strColour2, t.strColour3].filter(Boolean) : [];
+          const colorStrip = colors.length ? `<div class="tf-color-strip" style="display:flex;height:6px;border-radius:999px;overflow:hidden;margin-top:8px">${colors.map((c) => `<div style="flex:1;background:${c}"></div>`).join("")}</div>` : "";
+          body.innerHTML = `
+            <div style="display:flex;align-items:center;gap:10px;padding:4px 2px 6px">
+              ${t?.strBadge ? `<img src="${t.strBadge}" alt="" style="width:44px;height:44px;object-fit:contain"/>` : ""}
+              <div style="flex:1;min-width:0"><b style="font-size:13px">${esc(found.name)}</b><small style="display:block;color:var(--muted);font-size:10px">Formula 1 · ${esc(found.nationality || "—")}</small></div>
+            </div>
+            <div class="tf-info-grid">
+              ${t?.strStadium ? `<div class="tf-info-item"><span>⚙️ ${esc(t.strStadium)}</span><span></span></div>` : ""}
+              ${t?.strLocation ? `<div class="tf-info-item"><span>📍 ${esc(t.strLocation)}</span><span>${esc(t.strCountry || "")}</span></div>` : ""}
+            </div>
+            ${colorStrip}
+            ${socialLinks.length ? `<div class="tf-social" style="display:flex;gap:8px;justify-content:flex-end;padding:4px 0">${socialLinks.join("")}</div>` : ""}`;
+        } catch (e) { body.innerHTML = errorHTML("Search failed"); }
+      };
+      wrap.querySelector(".tf-go").addEventListener("click", run);
+      wrap.querySelector(".tf-input").addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+      return wrap;
+    },
+  },
+
+  nbaStandings: {
+    title: "NBA Standings", icon: "🏀", cat: "sports", sub: "basketball", size: "m",
+    render() {
+      const el = div(loadingHTML("Loading NBA standings…"));
+      getJSON("https://www.balldontlie.io/api/v1/games?per_page=1&seasons=2024", 300).then(() => {
+        getJSON("https://site.api.espn.com/apis/v2/sports/basketball/nba/standings", 300).then((d) => {
+          const groups = d.children || [];
+          const rows = [];
+          groups.forEach((g) => {
+            (g.standings?.entries || []).forEach((e) => {
+              const name = e.team?.displayName || "—";
+              const stats = {};
+              (e.stats || []).forEach((s) => { stats[s.name] = s.displayValue; });
+              rows.push({ name, conf: g.name, wins: parseInt(stats.wins) || 0, losses: parseInt(stats.losses) || 0, pct: stats.winPercent || "—" });
+            });
+          });
+          rows.sort((a, b) => b.wins - a.wins);
+          el.innerHTML = `<div class="league-table"><table><thead><tr><th>#</th><th>Team</th><th>Conf</th><th>W</th><th>L</th><th>%</th></tr></thead><tbody>` +
+            rows.slice(0, 15).map((r, i) => `<tr><td>${i + 1}</td><td><b>${esc(r.name)}</b></td><td>${esc(r.conf)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.pct}</td></tr>`).join("") +
+            `</tbody></table></div>`;
+        }).catch(() => { el.innerHTML = errorHTML("ESPN API unreachable"); });
+      }).catch(() => { el.innerHTML = errorHTML("NBA API unreachable"); });
+      return el;
+    },
+  },
+
+  nbaSchedule: {
+    title: "NBA Schedule", icon: "📅", cat: "sports", sub: "basketball", size: "m",
+    render() {
+      const el = div(loadingHTML("Loading NBA schedule…"));
+      const today = new Date().toISOString().slice(0, 10);
+      getJSON(`https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${today.replace(/-/g, "")}`, 300).then((d) => {
+        const events = d.events || [];
+        if (!events.length) { el.innerHTML = `<p class="center-text" style="padding:10px">No games today</p>`; return; }
+        el.innerHTML = `<div class="league-table"><table><thead><tr><th>Home</th><th>Score</th><th>Away</th><th>Status</th></tr></thead><tbody>` +
+          events.map((ev) => {
+            const comp = ev.competitions?.[0] || {};
+            const teams = comp.competitors || [];
+            const home = teams.find((t) => t.homeAway === "home") || teams[0] || {};
+            const away = teams.find((t) => t.homeAway === "away") || teams[1] || {};
+            const hScore = home.score || "—";
+            const aScore = away.score || "—";
+            const status = comp.status?.type?.shortDetail || "—";
+            return `<tr><td><b>${esc(home.team?.shortDisplayName || "—")}</b></td><td>${hScore} - ${aScore}</td><td><b>${esc(away.team?.shortDisplayName || "—")}</b></td><td>${esc(status)}</td></tr>`;
+          }).join("") +
+          `</tbody></table></div>`;
+      }).catch(() => { el.innerHTML = errorHTML("ESPN API unreachable"); });
+      return el;
+    },
+  },
+
+  nbaScores: {
+    title: "NBA Live Scores", icon: "🔴", cat: "sports", sub: "basketball", size: "m",
+    render() {
+      const el = div(loadingHTML("Loading NBA scores…"));
+      getJSON("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", 60).then((d) => {
+        const events = d.events || [];
+        if (!events.length) { el.innerHTML = `<p class="center-text" style="padding:10px">No live games</p>`; return; }
+        el.innerHTML = `<div class="league-table"><table><thead><tr><th>Home</th><th>Score</th><th>Away</th><th>Status</th></tr></thead><tbody>` +
+          events.map((ev) => {
+            const comp = ev.competitions?.[0] || {};
+            const teams = comp.competitors || [];
+            const home = teams.find((t) => t.homeAway === "home") || teams[0] || {};
+            const away = teams.find((t) => t.homeAway === "away") || teams[1] || {};
+            return `<tr><td><b>${esc(home.team?.shortDisplayName || "—")}</b></td><td>${home.score || "—"} - ${away.score || "—"}</td><td><b>${esc(away.team?.shortDisplayName || "—")}</b></td><td>${esc(comp.status?.type?.shortDetail || "—")}</td></tr>`;
+          }).join("") +
+          `</tbody></table></div>`;
+      }).catch(() => { el.innerHTML = errorHTML("ESPN API unreachable"); });
+      return el;
+    },
+  },
+
+  nbaPlayers: {
+    title: "NBA Top Players", icon: "⛹️", cat: "sports", sub: "basketball", size: "m",
+    render() {
+      const el = div(loadingHTML("Loading NBA players…"));
+      getJSON("https://www.balldontlie.io/api/v1/players?per_page=15&search=james", 300).then((d) => {
+        const players = d.data || [];
+        el.innerHTML = `<div class="league-table"><table><thead><tr><th>Name</th><th>Team</th><th>Pos</th><th>Ht</th></tr></thead><tbody>` +
+          players.map((p) => `<tr><td><b>${esc(p.first_name + " " + p.last_name)}</b></td><td>${esc(p.team?.full_name || "—")}</td><td>${esc(p.position || "—")}</td><td>${p.height_feet ? `${p.height_feet}'${p.height_inches}"` : "—"}</td></tr>`).join("") +
+          `</tbody></table></div>`;
+      }).catch(() => { el.innerHTML = errorHTML("NBA API unreachable"); });
+      return el;
+    },
+  },
+
+  nbaTeamFinder: {
+    title: "NBA Team Finder", icon: "🔎", cat: "sports", sub: "basketball", size: "m",
+    render() {
+      const wrap = div(`<div class="wl-add"><input class="note-area tf-input" placeholder="Search NBA team (e.g. Lakers)…" style="min-height:0;padding:8px 10px;flex:1;font-size:12px"/><button class="lib-chip tf-go" style="border-radius:10px">🔍</button></div><div class="tf-body"><p class="center-text" style="padding:8px 0">Search any NBA team</p></div>`);
+      const body = wrap.querySelector(".tf-body");
+      const run = async () => {
+        const q = wrap.querySelector(".tf-input").value.trim();
+        if (!q) return;
+        body.innerHTML = loadingHTML("Searching NBA teams…");
+        try {
+          const d = await getJSON(`https://www.thesportsdb.com/api/v1/json/3/searchteams.php?t=${encodeURIComponent(q)}`, 60);
+          const t = (d.teams || [])[0];
+          if (!t || t.strSport !== "Basketball") { body.innerHTML = errorHTML("No NBA team found"); return; }
+          const socialLinks = [];
+          if (t.strInstagram) socialLinks.push(`<a href="https://instagram.com/${esc(t.strInstagram)}" target="_blank" class="social-icon" title="Instagram"><svg width="16" height="16" viewBox="0 0 24 24"><defs><linearGradient id="ig" x1="0" y1="24" x2="24" y2="0"><stop offset="0%" stop-color="#feda75"/><stop offset="25%" stop-color="#fa7e1e"/><stop offset="50%" stop-color="#d62976"/><stop offset="75%" stop-color="#962fbf"/><stop offset="100%" stop-color="#4f5bd5"/></linearGradient></defs><rect width="24" height="24" rx="6" fill="url(#ig)"/><circle cx="12" cy="12" r="4.5" fill="none" stroke="#fff" stroke-width="1.8"/><circle cx="17.5" cy="6.5" r="1.3" fill="#fff"/></svg></a>`);
+          if (t.strFacebook) socialLinks.push(`<a href="https://facebook.com/${esc(t.strFacebook)}" target="_blank" class="social-icon" title="Facebook"><svg width="16" height="16" viewBox="0 0 24 24" fill="#1877F2"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg></a>`);
+          if (t.strTwitter) socialLinks.push(`<a href="https://x.com/${esc(t.strTwitter)}" target="_blank" class="social-icon" title="X"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>`);
+          const colors = t.strColour1 ? [t.strColour1, t.strColour2, t.strColour3].filter(Boolean) : [];
+          const colorStrip = colors.length ? `<div class="tf-color-strip" style="display:flex;height:6px;border-radius:999px;overflow:hidden;margin-top:8px">${colors.map((c) => `<div style="flex:1;background:${c}"></div>`).join("")}</div>` : "";
+          const keywords = t.strKeywords ? t.strKeywords.split(",").slice(0, 4).map((k) => `<span class="tf-keywords">${esc(k.trim())}</span>`).join(" ") : "";
+          body.innerHTML = `
+            <div style="display:flex;align-items:center;gap:10px;padding:4px 2px 6px">
+              ${t.strBadge ? `<img src="${t.strBadge}" alt="" style="width:44px;height:44px;object-fit:contain"/>` : ""}
+              <div style="flex:1;min-width:0"><b style="font-size:13px">${esc(t.strTeam)}</b><small style="display:block;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.strLeague || "")} · Est. ${esc(t.intFormedYear || "?")}</small></div>
+            </div>
+            <div class="tf-info-grid">
+              ${t.strStadium ? `<div class="tf-info-item"><span>🏀 ${esc(t.strStadium)}</span><span>${t.intStadiumCapacity ? Number(t.intStadiumCapacity).toLocaleString("en-US") : ""}</span></div>` : ""}
+              ${t.strLocation ? `<div class="tf-info-item"><span>📍 ${esc(t.strLocation)}</span><span>${esc(t.strCountry || "")}</span></div>` : ""}
+            </div>
+            ${colorStrip}
+            ${keywords ? `<div style="display:flex;flex-wrap:wrap;gap:4px;padding:6px 0 2px">${keywords}</div>` : ""}
+            ${socialLinks.length ? `<div class="tf-social" style="display:flex;gap:8px;justify-content:flex-end;padding:4px 0">${socialLinks.join("")}</div>` : ""}`;
+        } catch (e) { body.innerHTML = errorHTML("Search failed"); }
       };
       wrap.querySelector(".tf-go").addEventListener("click", run);
       wrap.querySelector(".tf-input").addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
@@ -2181,6 +2550,10 @@ function tmdbTrending(type, window) {
   return el;
 }
 
+function closeCtxMenu() {
+  document.querySelectorAll(".ctx-menu").forEach((m) => m.remove());
+}
+
 function toast(msg) {
   const t = document.createElement("div");
   t.className = "toast";
@@ -2367,30 +2740,60 @@ function openLibrary() {
   const current = getOrder(catKey);
   const wrap = div("");
   const cats = getCats();
+  const SUB_LABELS = { football: "⚽ Football", f1: "🏎️ Formula 1", basketball: "🏀 Basketball" };
   for (const [ck, cat] of Object.entries(cats)) {
     const ids = Object.keys(WIDGETS).filter((id) => WIDGETS[id].cat === ck);
     if (!ids.length) continue;
     const t = document.createElement("p");
     t.className = "lib-group-title";
     t.textContent = `${cat.icon} ${cat.label}`;
-    const chips = document.createElement("div");
-    chips.className = "lib-widgets";
-    ids.forEach((id) => {
-      const b = document.createElement("button");
-      b.className = "lib-chip" + (current.includes(id) ? " added" : "");
-      b.innerHTML = `${WIDGETS[id].icon} ${WIDGETS[id].title}${current.includes(id) ? " ✓" : " ＋"}`;
-      b.addEventListener("click", () => {
-        state.removed[catKey] = (state.removed[catKey] || []).filter((x) => x !== id);
-        state.orders[catKey] = [...getOrder(catKey), id];
-        saveState();
-        renderGrid();
-        b.classList.add("added");
-        b.innerHTML = `${WIDGETS[id].icon} ${WIDGETS[id].title} ✓`;
-      });
-      chips.appendChild(b);
-    });
     wrap.appendChild(t);
-    wrap.appendChild(chips);
+    if (cat.sub && cat.sub.length) {
+      cat.sub.forEach((subKey) => {
+        const subIds = ids.filter((id) => WIDGETS[id].sub === subKey);
+        if (!subIds.length) return;
+        const subTitle = document.createElement("p");
+        subTitle.className = "lib-group-title";
+        subTitle.style.cssText = "margin:4px 0 2px;font-size:11px;opacity:.7;padding-left:8px";
+        subTitle.textContent = SUB_LABELS[subKey] || subKey;
+        const chips = document.createElement("div");
+        chips.className = "lib-widgets";
+        subIds.forEach((id) => {
+          const b = document.createElement("button");
+          b.className = "lib-chip" + (current.includes(id) ? " added" : "");
+          b.innerHTML = `${WIDGETS[id].icon} ${WIDGETS[id].title}${current.includes(id) ? " ✓" : " ＋"}`;
+          b.addEventListener("click", () => {
+            state.removed[catKey] = (state.removed[catKey] || []).filter((x) => x !== id);
+            state.orders[catKey] = [...getOrder(catKey), id];
+            saveState();
+            renderGrid();
+            b.classList.add("added");
+            b.innerHTML = `${WIDGETS[id].icon} ${WIDGETS[id].title} ✓`;
+          });
+          chips.appendChild(b);
+        });
+        wrap.appendChild(subTitle);
+        wrap.appendChild(chips);
+      });
+    } else {
+      const chips = document.createElement("div");
+      chips.className = "lib-widgets";
+      ids.forEach((id) => {
+        const b = document.createElement("button");
+        b.className = "lib-chip" + (current.includes(id) ? " added" : "");
+        b.innerHTML = `${WIDGETS[id].icon} ${WIDGETS[id].title}${current.includes(id) ? " ✓" : " ＋"}`;
+        b.addEventListener("click", () => {
+          state.removed[catKey] = (state.removed[catKey] || []).filter((x) => x !== id);
+          state.orders[catKey] = [...getOrder(catKey), id];
+          saveState();
+          renderGrid();
+          b.classList.add("added");
+          b.innerHTML = `${WIDGETS[id].icon} ${WIDGETS[id].title} ✓`;
+        });
+        chips.appendChild(b);
+      });
+      wrap.appendChild(chips);
+    }
   }
   openModal("Widget Library", wrap);
 }
@@ -2550,6 +2953,11 @@ const STYLE_THEMES = {
     label: "Spatial UI (visionOS)", icon: "🪟",
     desc: "Vision Pro glass — floating frosted panels with specular rims over a vivid depth scene.",
     swatches: ["#0F1030", "#FFFFFF99", "#5AC8FA", "#FF375F"],
+  },
+  glassDark: {
+    label: "Glass Dark", icon: "🔮",
+    desc: "Dark glassmorphism — frosted glass cards over soft gradient orbs with smooth animations.",
+    swatches: ["#000000", "#E887BD", "#9DCEAE", "#83BDD3"],
   },
 };
 
