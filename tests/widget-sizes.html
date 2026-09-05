@@ -1,9 +1,9 @@
 <!DOCTYPE html>
 <html lang="en" dir="ltr">
-<head>
+<head><base href="/">
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Nexora</title>
+  <title>Nexora sizing checks</title>
   <meta name="description" content="Nexora — your personal widget dashboard with live data." />
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <link rel="stylesheet" href="styles.css" />
@@ -34,25 +34,20 @@
         <button class="icon-btn" id="themeBtn" title="Toggle theme">🌙</button>
         <button class="icon-btn" id="resetBtn" title="Reset layout for this page">↺</button>
       </header>
-      <div class="layout-tools">
-        <p id="layoutHelp">Drag widgets anywhere · Resize from the bottom-right corner</p>
-        <button id="undoLayoutBtn" type="button" disabled>Undo layout</button>
-        <button id="arrangeWidgetsBtn" type="button">Auto arrange</button>
-      </div>
-      <section class="widget-grid" id="widgetGrid" aria-describedby="layoutHelp"></section>
+      <section class="widget-grid" id="widgetGrid"></section>
     </main>
   </div>
 
   <div id="modalRoot"></div>
 
-  <script src="widget-layout.js"></script>
-  <script src="widget-canvas.js"></script>
-  <script src="alarm-clock.js"></script><script src="app.js"></script>
+  <script src="tests/fixtures.js"></script><script src="widget-layout.js"></script><script src="widget-canvas.js"></script><script src="alarm-clock.js"></script><script src="app.js"></script><script src="tests/widget-sizes.js"></script>
   
   <!-- Vercel Speed Insights -->
   <script>
     window.si = window.si || function () { (window.siq = window.siq || []).push(arguments); };
   </script>
-  <script defer src="/_vercel/speed-insights/script.js"></script>
+  
 </body>
 </html>
+
+
