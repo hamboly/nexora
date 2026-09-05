@@ -8,6 +8,8 @@ let state = {
   style: "aurora",
   orders: {},
   sizes: {},
+  customSizes: {},
+  layouts: {},
   removed: {},
   notes: "",
   todos: [],
@@ -172,6 +174,49 @@ function getCats() {
   return cats;
 }
 
+/* World clock helpers */
+const WORLD_CLOCK_CITIES = [
+  { name: 'New York', timeZone: 'America/New_York' },
+  { name: 'London', timeZone: 'Europe/London' },
+  { name: 'Berlin', timeZone: 'Europe/Berlin' },
+  { name: 'Tehran', timeZone: 'Asia/Tehran' },
+  { name: 'Tokyo', timeZone: 'Asia/Tokyo' },
+  { name: 'Sydney', timeZone: 'Australia/Sydney' },
+  { name: 'Dubai', timeZone: 'Asia/Dubai' },
+  { name: 'Singapore', timeZone: 'Asia/Singapore' },
+  { name: 'Los Angeles', timeZone: 'America/Los_Angeles' },
+];
+const WORLD_CLOCK_FORMATTERS = new Map();
+function canonicalTimeZone(timeZone) {
+  return new Intl.DateTimeFormat('en', { timeZone }).resolvedOptions().timeZone;
+}
+function getWorldClockCities(localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone) {
+  const local = canonicalTimeZone(localTimeZone);
+  return WORLD_CLOCK_CITIES.filter(city => canonicalTimeZone(city.timeZone) !== local).slice(0, 8);
+}
+function formatWorldClockTime(date, timeZone) {
+  if (!WORLD_CLOCK_FORMATTERS.has(timeZone)) {
+    WORLD_CLOCK_FORMATTERS.set(timeZone, new Intl.DateTimeFormat('en-GB', {
+      timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }));
+  }
+  return WORLD_CLOCK_FORMATTERS.get(timeZone).format(date);
+}
+function formatLocalClockTime(date, timeZone) {
+  const key = 'local:' + timeZone;
+  if (!WORLD_CLOCK_FORMATTERS.has(key)) {
+    WORLD_CLOCK_FORMATTERS.set(key, new Intl.DateTimeFormat('en-US', {
+      timeZone, hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
+    }));
+  }
+  const parts = WORLD_CLOCK_FORMATTERS.get(key).formatToParts(date);
+  return {
+    time: parts.filter(part => part.type !== 'dayPeriod').map(part => part.value).join('').trim(),
+    period: parts.find(part => part.type === 'dayPeriod')?.value || '',
+  };
+}
+/* End world clock helpers */
+
 const WIDGETS = {
   todaySummary: {
     title: "Today Summary", icon: "☀️", cat: "general", size: "m",
@@ -284,28 +329,18 @@ const WIDGETS = {
       }).catch(() => { el.innerHTML = errorHTML("Open-Meteo unreachable"); });
       return el;
     },
-    detail() {
-      const el = div(loadingHTML());
-      getJSON("https://api.open-meteo.com/v1/forecast?latitude=40.7128&longitude=-74.006&daily=temperature_2m_max,temperature_2m_min,weather_code&timezone=auto&forecast_days=7", 60).then((d) => {
-        const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        el.innerHTML = list(
-          d.daily.time.map((t, i) => {
-            const dt = new Date(t);
-            return row(`${days[dt.getDay()]} ${dt.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`, `${Math.round(d.daily.temperature_2m_max[i])}° / ${Math.round(d.daily.temperature_2m_min[i])}°`);
-          })
-        ).innerHTML;
-      }).catch(() => { el.innerHTML = errorHTML(); });
-      return el;
-    },
   },
   clock: {
     title: "Clock", icon: "🕐", cat: "general", size: "m",
     render() {
+      const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const cities = getWorldClockCities(localTimeZone);
+      const localCity = localTimeZone.split("/").pop().replaceAll("_", " ");
       const el = div(`
         <div class="clock-hero">
-          <div class="clock-digital"><strong></strong><span>Local time</span></div>
+          <div class="clock-digital"><strong><span class="clock-value"></span><small class="clock-period"></small></strong><span>${esc(localCity)} · Local time</span></div>
           <div class="analog-face">
-            ${Array.from({ length: 12 }, (_, i) => `<b class="mark" style="transform:translateX(-50%) rotate(${i * 30}deg)"></b>`).join("")}
+            ${Array.from({ length: 12 }, (_, i) => `<b class="mark" style="--mark-angle:${i * 30}deg"></b>`).join("")}
             <i class="hand-hour"></i><i class="hand-minute"></i><i class="hand-second"></i><b class="pin"></b>
           </div>
         </div>
@@ -314,22 +349,24 @@ const WIDGETS = {
           <span>☀️<span><small>Sunrise</small><b>06:18</b></span></span>
           <span>🌙<span><small>Sunset</small><b>19:47</b></span></span>
         </div>
-        <div class="alarm-head">⏰ Alarms <span class="alarm-count"></span></div>
-        <div class="alarm-list"></div>
-        <div class="wl-add alarm-add">
-          <input type="time" class="note-area alarm-time" style="min-height:0;padding:6px 8px;flex:0 0 108px;font-size:12px"/>
-          <input class="note-area alarm-label" placeholder="Label…" style="min-height:0;padding:6px 8px;flex:1;font-size:12px"/>
-          <button class="lib-chip alarm-go" style="border-radius:10px">＋</button>
-        </div>`);
+        <div class="world-clocks" aria-label="World clocks">${cities.map(city => `<div class="world-clock-city"><span>${city.name}</span><time data-zone="${city.timeZone}"></time></div>`).join("")}</div>`);
+      el.classList.add('clock-content');
       const dig = el.querySelector(".clock-digital strong");
+      const clockValue = el.querySelector('.clock-value');
+      const clockPeriod = el.querySelector('.clock-period');
       const hr = el.querySelector(".hand-hour");
       const mn = el.querySelector(".hand-minute");
       const sc = el.querySelector(".hand-second");
       const dMain = el.querySelector(".d-main");
       const dSub = el.querySelector(".d-sub");
+      const worldTimes = [...el.querySelectorAll(".world-clock-city time")];
       const tick = () => {
         const n = new Date();
-        dig.textContent = n.toLocaleTimeString("en-US");
+        const local = formatLocalClockTime(n, localTimeZone);
+        clockValue.textContent = local.time;
+        clockPeriod.textContent = local.period;
+        dig.setAttribute('aria-label', local.time + ' ' + local.period);
+        worldTimes.forEach(time => { time.textContent = formatWorldClockTime(n, time.dataset.zone); });
         const s = n.getSeconds(), m = n.getMinutes(), h = n.getHours() % 12;
         sc.style.transform = `translateX(-50%) rotate(${s * 6}deg)`;
         mn.style.transform = `translateX(-50%) rotate(${m * 6 + s * 0.1}deg)`;
@@ -339,60 +376,7 @@ const WIDGETS = {
       };
       tick();
       setInterval(tick, 1000);
-      if (!state.alarms) state.alarms = [];
-      const alarmList = el.querySelector(".alarm-list");
-      const paintAlarms = () => {
-        alarmList.innerHTML = state.alarms.map((a, i) =>
-          `<div class="list-row"><span class="main-col"><b dir="ltr">${a.time}</b>${a.label ? " · " + esc(a.label) : ""}</span><button class="w-action alarm-toggle" data-i="${i}" title="On/Off" style="opacity:${a.enabled ? ".95" : ".4"}">${a.enabled ? "🔔" : "🔕"}</button><button class="w-action alarm-del" data-i="${i}" title="Delete" style="opacity:.5">✕</button></div>`
-        ).join("") || `<p class="center-text" style="padding:2px 0;font-size:11px">No alarms yet — add one below</p>`;
-        el.querySelector(".alarm-count").textContent = state.alarms.length ? `(${state.alarms.filter((a) => a.enabled).length}/${state.alarms.length})` : "";
-        alarmList.querySelectorAll(".alarm-toggle").forEach((b) =>
-          b.addEventListener("click", () => { state.alarms[+b.dataset.i].enabled = !state.alarms[+b.dataset.i].enabled; saveState(); paintAlarms(); })
-        );
-        alarmList.querySelectorAll(".alarm-del").forEach((b) =>
-          b.addEventListener("click", () => { state.alarms.splice(+b.dataset.i, 1); saveState(); paintAlarms(); })
-        );
-      };
-      paintAlarms();
-      const addAlarm = () => {
-        const t = el.querySelector(".alarm-time").value;
-        if (!t) return;
-        state.alarms.push({ time: t, label: el.querySelector(".alarm-label").value.trim(), enabled: true });
-        el.querySelector(".alarm-label").value = "";
-        saveState();
-        paintAlarms();
-      };
-      el.querySelector(".alarm-go").addEventListener("click", addAlarm);
-      const firedKeys = {};
-      setInterval(() => {
-        const n = new Date();
-        const hm = `${String(n.getHours()).padStart(2, "0")}:${String(n.getMinutes()).padStart(2, "0")}`;
-        state.alarms.forEach((a) => {
-          if (!a.enabled || a.time !== hm) return;
-          const key = n.toDateString() + hm + (a.label || "");
-          if (firedKeys[key]) return;
-          firedKeys[key] = true;
-          toast(`⏰ Alarm${a.label ? " — " + a.label : ""} (${a.time})`);
-          try {
-            const ctx = new (window.AudioContext || window.webkitAudioContext)();
-            [0, 450, 900].forEach((delay) => {
-              const o = ctx.createOscillator(), g = ctx.createGain();
-              o.connect(g); g.connect(ctx.destination);
-              o.frequency.value = 880; g.gain.value = 0.07;
-              o.start(ctx.currentTime + delay / 1000);
-              o.stop(ctx.currentTime + delay / 1000 + 0.22);
-            });
-          } catch (e) {}
-        });
-      }, 5000);
       return el;
-    },
-    detail() {
-      const rows = [
-        ["New York", "-5h"], ["London", "0h"], ["Berlin", "+1h"],
-        ["Tehran", "+3:30h"], ["Tokyo", "+9h"], ["Sydney", "+11h"],
-      ];
-      return list(rows.map((r) => row(r[0], r[1])));
     },
   },
   calendar: {
@@ -514,11 +498,15 @@ const WIDGETS = {
       el.querySelector(".prev").addEventListener("click", () => { view.setMonth(view.getMonth() - 1); paint(); });
       el.querySelector(".next").addEventListener("click", () => { view.setMonth(view.getMonth() + 1); paint(); });
       paint();
+      setTimeout(() => {
+        const todayBtn = daysBox.querySelector(".cal-day.today");
+        if (todayBtn && !el.closest('[data-adaptive="true"]')) todayBtn.scrollIntoView({ block: "center", behavior: "smooth" });
+      }, 100);
       return el;
     },
   },
   notes: {
-    title: "Notes", icon: "📝", cat: "general", size: "m",
+    title: "Notes", icon: "📝", cat: "general", size: "s",
     render() {
       const wrap = div(`<textarea class="note-area" placeholder="Write here..."></textarea>`);
       const ta = wrap.querySelector("textarea");
@@ -716,7 +704,7 @@ const WIDGETS = {
     },
   },
   quote: {
-    title: "Quote of the Day", icon: "💭", cat: "general", size: "s",
+    title: "Quote of the Day", icon: "💭", cat: "general", size: "m",
     render() {
       const el = div(loadingHTML());
       const local = () => {
@@ -743,7 +731,7 @@ const WIDGETS = {
         const evs = d.events || [];
         if (!evs.length) { el.innerHTML = errorHTML("No recent events"); return; }
         const byDay = {};
-        evs.slice(0, 12).forEach((e) => { (byDay[e.dateEvent] = byDay[e.dateEvent] || []).push(e); });
+        evs.forEach((e) => { (byDay[e.dateEvent] = byDay[e.dateEvent] || []).push(e); });
         el.innerHTML = Object.entries(byDay).map(([day, ms]) =>
           `<p class="ls-day">${new Date(day + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}${ms[0].intRound ? ` · MW ${ms[0].intRound}` : ""}</p>` +
           ms.map((e) => row(
@@ -769,7 +757,7 @@ const WIDGETS = {
     render() {
       const el = div(loadingHTML("Fetching TheSportsDB…"));
       getJSON("https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4328", 20).then((d) => {
-        const evs = (d.events || []).slice(0, 16);
+        const evs = d.events || [];
         if (!evs.length) { el.innerHTML = errorHTML("No upcoming events"); return; }
         const byDay = {};
         evs.forEach((e) => { (byDay[e.dateEvent] = byDay[e.dateEvent] || []).push(e); });
@@ -785,7 +773,7 @@ const WIDGETS = {
     },
   },
   leagueTable: {
-    title: "Top 3 — Big Five Leagues", icon: "🏅", cat: "sports", size: "m",
+    title: "Top 3 — Big Five Leagues", icon: "🏅", cat: "sports", size: "l",
     render() {
       const LEAGUES = [["Premier League", 4328], ["La Liga", 4335], ["Serie A", 4332], ["Bundesliga", 4331], ["Ligue 1", 4334]];
       const MEDALS = ["🥇", "🥈", "🥉"];
@@ -837,7 +825,7 @@ const WIDGETS = {
   },
 
   multiScores: {
-    title: "Scores Across Leagues", icon: "🌍", cat: "sports", size: "m",
+    title: "Scores Across Leagues", icon: "🌍", cat: "sports", size: "l",
     render() {
       const LEAGUES = [["English PL", 4328], ["La Liga", 4335], ["Serie A", 4332], ["Bundesliga", 4331], ["Ligue 1", 4334], ["UCL", 4480], ["NBA", 4387], ["NHL", 4380], ["MLB", 4424]];
       const wrap = div(`<div class="mood-chips lg-chips"></div><div class="lg-body">${loadingHTML()}</div>`);
@@ -911,13 +899,13 @@ const WIDGETS = {
   },
 
   f1Standings: {
-    title: "F1 Drivers Standings", icon: "🏎️", cat: "sports", sub: "f1", size: "m",
+    title: "F1 Drivers Standings", icon: "🏎️", cat: "sports", sub: "f1", size: "l",
     render() {
       const el = div(loadingHTML("Loading F1 standings…"));
       getJSON("https://api.jolpi.ca/ergast/f1/current/driverStandings.json", 300).then((d) => {
         const list = d.MRData.StandingsTable.StandingsLists[0]?.DriverStandings || [];
         el.innerHTML = `<div class="league-table"><table><thead><tr><th>#</th><th>Driver</th><th>Team</th><th>Pts</th></tr></thead><tbody>` +
-          list.slice(0, 6).map((s, i) => `<tr><td>${s.position}</td><td>${esc(s.Driver.givenName + " " + s.Driver.familyName)}</td><td>${esc(s.Constructors[0]?.name || "—")}</td><td><b>${s.points}</b></td></tr>`).join("") +
+          list.map((s, i) => `<tr><td>${s.position}</td><td>${esc(s.Driver.givenName + " " + s.Driver.familyName)}</td><td>${esc(s.Constructors[0]?.name || "—")}</td><td><b>${s.points}</b></td></tr>`).join("") +
           `</tbody></table></div>`;
       }).catch(() => { el.innerHTML = errorHTML("F1 API unreachable"); });
       return el;
@@ -931,7 +919,7 @@ const WIDGETS = {
       getJSON("https://api.jolpi.ca/ergast/f1/current/constructorStandings.json", 300).then((d) => {
         const list = d.MRData.StandingsTable.StandingsLists[0]?.ConstructorStandings || [];
         el.innerHTML = `<div class="league-table"><table><thead><tr><th>#</th><th>Constructor</th><th>Nationality</th><th>Pts</th></tr></thead><tbody>` +
-          list.slice(0, 6).map((s) => `<tr><td>${s.position}</td><td><b>${esc(s.Constructor.name)}</b></td><td>${esc(s.Constructor.nationality || "—")}</td><td><b>${s.points}</b></td></tr>`).join("") +
+          list.map((s) => `<tr><td>${s.position}</td><td><b>${esc(s.Constructor.name)}</b></td><td>${esc(s.Constructor.nationality || "—")}</td><td><b>${s.points}</b></td></tr>`).join("") +
           `</tbody></table></div>`;
       }).catch(() => { el.innerHTML = errorHTML("F1 API unreachable"); });
       return el;
@@ -939,13 +927,13 @@ const WIDGETS = {
   },
 
   f1Schedule: {
-    title: "F1 Schedule", icon: "📅", cat: "sports", sub: "f1", size: "m",
+    title: "F1 Schedule", icon: "📅", cat: "sports", sub: "f1", size: "l",
     render() {
       const el = div(loadingHTML("Loading F1 schedule…"));
       getJSON("https://api.jolpi.ca/ergast/f1/current.json", 300).then((d) => {
         const races = d.MRData.RaceTable.Races || [];
         el.innerHTML = `<div class="league-table"><table><thead><tr><th>Round</th><th>Grand Prix</th><th>Circuit</th><th>Date</th></tr></thead><tbody>` +
-          races.slice(0, 6).map((r) => `<tr><td>${r.round}</td><td><b>${esc(r.raceName)}</b></td><td>${esc(r.Circuit.circuitName)}</td><td>${r.date}</td></tr>`).join("") +
+          races.map((r) => `<tr><td>${r.round}</td><td><b>${esc(r.raceName)}</b></td><td>${esc(r.Circuit.circuitName)}</td><td>${r.date}</td></tr>`).join("") +
           `</tbody></table></div>`;
       }).catch(() => { el.innerHTML = errorHTML("F1 API unreachable"); });
       return el;
@@ -953,14 +941,14 @@ const WIDGETS = {
   },
 
   f1Results: {
-    title: "F1 Latest Results", icon: "🏆", cat: "sports", sub: "f1", size: "m",
+    title: "F1 Latest Results", icon: "🏆", cat: "sports", sub: "f1", size: "l",
     render() {
       const el = div(loadingHTML("Loading latest F1 results…"));
       getJSON("https://api.jolpi.ca/ergast/f1/current/last/results.json", 300).then((d) => {
         const results = d.MRData.RaceTable.Races[0]?.Results || [];
         const raceName = d.MRData.RaceTable.Races[0]?.raceName || "Last Race";
         el.innerHTML = `<p style="font-weight:700;margin:0 0 6px;font-size:13px">${esc(raceName)}</p><div class="league-table"><table><thead><tr><th>#</th><th>Driver</th><th>Team</th><th>Time</th></tr></thead><tbody>` +
-          results.slice(0, 6).map((r) => `<tr><td>${r.position}</td><td>${esc(r.Driver.givenName + " " + r.Driver.familyName)}</td><td>${esc(r.Constructor.name)}</td><td>${r.Time?.time || r.status}</td></tr>`).join("") +
+          results.map((r) => `<tr><td>${r.position}</td><td>${esc(r.Driver.givenName + " " + r.Driver.familyName)}</td><td>${esc(r.Constructor.name)}</td><td>${r.Time?.time || r.status}</td></tr>`).join("") +
           `</tbody></table></div>`;
       }).catch(() => { el.innerHTML = errorHTML("F1 API unreachable"); });
       return el;
@@ -1009,7 +997,7 @@ const WIDGETS = {
   },
 
   nbaStandings: {
-    title: "NBA Standings", icon: "🏀", cat: "sports", sub: "basketball", size: "m",
+    title: "NBA Standings", icon: "🏀", cat: "sports", sub: "basketball", size: "l",
     render() {
       const el = div(loadingHTML("Loading NBA standings…"));
       getJSON("https://www.balldontlie.io/api/v1/games?per_page=1&seasons=2024", 300).then(() => {
@@ -1026,7 +1014,7 @@ const WIDGETS = {
           });
           rows.sort((a, b) => b.wins - a.wins);
           el.innerHTML = `<div class="league-table"><table><thead><tr><th>#</th><th>Team</th><th>Conf</th><th>W</th><th>L</th><th>%</th></tr></thead><tbody>` +
-            rows.slice(0, 15).map((r, i) => `<tr><td>${i + 1}</td><td><b>${esc(r.name)}</b></td><td>${esc(r.conf)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.pct}</td></tr>`).join("") +
+            rows.map((r, i) => `<tr><td>${i + 1}</td><td><b>${esc(r.name)}</b></td><td>${esc(r.conf)}</td><td>${r.wins}</td><td>${r.losses}</td><td>${r.pct}</td></tr>`).join("") +
             `</tbody></table></div>`;
         }).catch(() => { el.innerHTML = errorHTML("ESPN API unreachable"); });
       }).catch(() => { el.innerHTML = errorHTML("NBA API unreachable"); });
@@ -1035,7 +1023,7 @@ const WIDGETS = {
   },
 
   nbaSchedule: {
-    title: "NBA Schedule", icon: "📅", cat: "sports", sub: "basketball", size: "m",
+    title: "NBA Schedule", icon: "📅", cat: "sports", sub: "basketball", size: "l",
     render() {
       const el = div(loadingHTML("Loading NBA schedule…"));
       const today = new Date().toISOString().slice(0, 10);
@@ -1060,7 +1048,7 @@ const WIDGETS = {
   },
 
   nbaScores: {
-    title: "NBA Live Scores", icon: "🔴", cat: "sports", sub: "basketball", size: "m",
+    title: "NBA Live Scores", icon: "🔴", cat: "sports", sub: "basketball", size: "l",
     render() {
       const el = div(loadingHTML("Loading NBA scores…"));
       getJSON("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard", 60).then((d) => {
@@ -1236,7 +1224,7 @@ const WIDGETS = {
     },
   },
   topMovers: {
-    title: "Top Movers · 24h", icon: "🚀", cat: "finance", size: "s",
+    title: "Top Movers · 24h", icon: "🚀", cat: "finance", size: "m",
     render() {
       const el = div(loadingHTML("Fetching CoinGecko…"));
       let retried = false;
@@ -1269,7 +1257,7 @@ const WIDGETS = {
     },
   },
   fearGreed: {
-    title: "Fear & Greed Index", icon: "😱", cat: "finance", size: "s",
+    title: "Fear & Greed Index", icon: "😱", cat: "finance", size: "m",
     render() {
       const el = div(loadingHTML("Fetching alternative.me…"));
       getJSON("https://api.alternative.me/fng/?limit=8", 60, {}, (d) => !!(d && d.data && d.data.length)).then((d) => {
@@ -1289,7 +1277,7 @@ const WIDGETS = {
     },
   },
   currencyConverter: {
-    title: "Currency Converter", icon: "💱", cat: "finance", size: "s",
+    title: "Currency Converter", icon: "💱", cat: "finance", size: "m",
     render() {
       const CUR = ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "TRY", "AED"];
       const wrap = div(`
@@ -1349,7 +1337,7 @@ const WIDGETS = {
       const el = div(loadingHTML("Fetching Apple Music charts…"));
       appleChart("topsongs", 10).then((items) => {
         if (!items.length) throw new Error("empty");
-        el.innerHTML = items.slice(0, 8).map((t, i) =>
+        el.innerHTML = items.map((t, i) =>
           `<div class="market-row track-row" data-i="${i}" style="cursor:pointer"><img src="${t.img}" alt="" onerror="this.style.visibility='hidden'"/><span class="market-name"><b>${i + 1}. ${esc(t.title)}</b><small>${esc(t.artist)}</small></span><span class="np-mini">▶</span></div>`
         ).join("") + `<p class="center-text" style="margin-top:8px;font-size:10px">Tap a song for a live 30s preview · itunes.apple.com</p>`;
         el.querySelectorAll(".track-row").forEach((rEl) => {
@@ -1370,7 +1358,7 @@ const WIDGETS = {
     },
   },
   topArtists: {
-    title: "Top Artists Now", icon: "🎤", cat: "music", size: "s",
+    title: "Top Artists Now", icon: "🎤", cat: "music", size: "m",
     render() {
       const el = div(loadingHTML());
       appleChart("topsongs", 25).then((items) => {
@@ -1385,7 +1373,7 @@ const WIDGETS = {
     },
   },
   moodMixes: {
-    title: "Mood Mixes", icon: "🌈", cat: "music", size: "s",
+    title: "Mood Mixes", icon: "🌈", cat: "music", size: "m",
     render() {
       const MOODS = {
         "🎯 Focus": "focus instrumental study",
@@ -1652,26 +1640,34 @@ const WIDGETS = {
       const fill = (o) => {
         const img = el.querySelector(".art-img");
         if (img) {
-          img.style.display = o.primaryImageSmall ? "" : "none";
-          if (o.primaryImageSmall) img.src = o.primaryImageSmall;
+          img.style.display = o.primaryImage ? "" : (o.primaryImageSmall ? "" : "none");
+          img.src = o.primaryImage || o.primaryImageSmall || "";
         }
-        el.querySelector(".quote-box").innerHTML =
-          `«${decodeEntities(o.title)}»` +
-          `<span class="quote-author">${decodeEntities(o.artistDisplayName || "Unknown")} · ${o.objectDate || ""}</span>` +
-          (o.medium ? `<span class="quote-author">${decodeEntities(o.medium)}</span>` : "");
-        el.querySelector(".art-meta").textContent = [decodeEntities(o.dimensions || ""), o.GalleryNumber ? "Gallery " + o.GalleryNumber : ""].filter(Boolean).join(" · ");
+        const details = [
+          o.artistDisplayName && `🎨 ${decodeEntities(o.artistDisplayName)}`,
+          o.objectDate && `📅 ${decodeEntities(o.objectDate)}`,
+          o.medium && `🖌️ ${decodeEntities(o.medium)}`,
+          o.dimensions && `📏 ${decodeEntities(o.dimensions)}`,
+          o.culture && `🌍 ${decodeEntities(o.culture)}`,
+          o.classification && `📂 ${decodeEntities(o.classification)}`,
+        ].filter(Boolean).slice(0, 4);
+        
+        el.querySelector(".art-title").textContent = decodeEntities(o.title || "Untitled");
+        el.querySelector(".art-details").innerHTML = details.map(d => `<div class="art-detail-row">${d}</div>`).join("");
         el.querySelector(".art-src").href = o.objectURL || "#";
       };
       metPick("painting", 0).then((o) => {
         el.innerHTML = `
-          <img class="art-img" src="" alt="" style="width:100%;height:auto;max-height:300px;border-radius:12px;margin-bottom:8px;object-fit:contain"/>
-          <div class="quote-box" style="padding-top:4px"></div>
-          <p class="art-meta center-text" style="font-size:10.5px;color:var(--muted);margin-top:5px"></p>
-          <div style="display:flex;gap:6px;margin-top:6px">
-            <input class="note-area art-search" placeholder="Search artwork or artist at The Met…" style="min-height:0;padding:8px 10px;flex:1;font-size:12px"/>
-            <button class="lib-chip art-go" style="border-radius:10px">🔍</button>
+          <img class="art-img" src="${o.primaryImage || o.primaryImageSmall || ''}" alt="${esc(decodeEntities(o.title || 'Artwork'))}" style="width:100%;height:auto;max-height:45%;border-radius:10px;margin-bottom:8px;object-fit:contain;background:var(--card)"/>
+          <div class="art-info">
+            <h3 class="art-title" style="font-size:13px;font-weight:700;margin-bottom:6px;line-height:1.2"></h3>
+            <div class="art-details" style="font-size:10.5px;line-height:1.5;color:var(--ink)"></div>
           </div>
-          <p class="center-text" style="margin-top:6px;font-size:10px"><a class="art-src" href="#" target="_blank" style="color:var(--muted)">view at metmuseum.org ↗</a> · open access</p>`;
+          <p class="center-text" style="margin-top:6px;font-size:9px"><a class="art-src" href="${o.objectURL || '#'}" target="_blank" style="color:var(--accent)">View at metmuseum.org ↗</a> · Open Access</p>
+          <div style="display:flex;gap:6px;margin-top:8px">
+            <input class="note-area art-search" placeholder="Search Met collection…" style="min-height:0;padding:5px 8px;flex:1;font-size:10px"/>
+            <button class="lib-chip art-go" style="border-radius:8px;padding:5px 8px;font-size:10px">🔍</button>
+          </div>`;
         fill(o);
         const runSearch = async () => {
           const q = el.querySelector(".art-search").value.trim();
@@ -1697,55 +1693,96 @@ const WIDGETS = {
   artistSpotlight: {
     title: "Artist Spotlight", icon: "🖌️", cat: "art", size: "m",
     render() {
-      const el = div(loadingHTML("Fetching The Met collection…"));
+      const el = div(loadingHTML("Fetching artist highlight…"));
       metPick("portrait", 3).then((o) => {
+        const details = [
+          o.artistDisplayName && `🎨 ${decodeEntities(o.artistDisplayName)}`,
+          o.objectDate && `📅 ${decodeEntities(o.objectDate)}`,
+          o.medium && `🖌️ ${decodeEntities(o.medium)}`,
+          o.dimensions && `📏 ${decodeEntities(o.dimensions)}`,
+          o.culture && `🌍 ${decodeEntities(o.culture)}`,
+          o.classification && `📂 ${decodeEntities(o.classification)}`,
+        ].filter(Boolean).slice(0, 4);
+        
         el.innerHTML = `
-          ${o.primaryImageSmall ? `<img class="art-img" src="${o.primaryImageSmall}" alt="" style="width:100%;height:auto;max-height:280px;border-radius:12px;margin-bottom:8px;object-fit:contain"/>` : ""}
-          <div class="quote-box"><b>${decodeEntities(o.artistDisplayName || "Unknown artist")}</b><span class="quote-author">«${decodeEntities(o.title)}» · ${o.objectDate || ""} · ${decodeEntities(o.medium || "")}</span></div>
-          <p class="center-text" style="font-size:10.5px;color:var(--muted);margin-top:5px">${[decodeEntities(o.dimensions || ""), o.GalleryNumber ? "Gallery " + o.GalleryNumber : ""].filter(Boolean).join(" · ")}</p>
-          <p class="center-text" style="margin-top:6px;font-size:10px"><a href="${o.objectURL}" target="_blank" style="color:var(--muted)">view at metmuseum.org ↗</a> · open access</p>`;
+          <img class="art-img" src="${o.primaryImage || o.primaryImageSmall || ''}" alt="${esc(decodeEntities(o.title || 'Artwork'))}" style="width:100%;height:auto;max-height:45%;border-radius:10px;margin-bottom:8px;object-fit:contain;background:var(--card)"/>
+          <div class="art-info">
+            <h3 style="font-size:13px;font-weight:700;margin-bottom:4px;line-height:1.2">${decodeEntities(o.title || "Untitled")}</h3>
+            <p style="font-size:11px;font-weight:600;color:var(--accent);margin-bottom:6px">${decodeEntities(o.artistDisplayName || "Unknown artist")}</p>
+            <div style="font-size:10.5px;line-height:1.5;color:var(--ink)">${details.map(d => `<div>${d}</div>`).join("")}</div>
+          </div>
+          <p class="center-text" style="margin-top:6px;font-size:9px"><a href="${o.objectURL || '#'}" target="_blank" style="color:var(--accent)">View at metmuseum.org ↗</a> · Open Access</p>`;
       }).catch(() => { el.innerHTML = errorHTML("The Met unreachable"); });
       return el;
     },
   },
   exhibitions: {
-    title: "Exhibitions — AIC", icon: "🏛️", cat: "art", size: "m",
+    title: "Current Exhibitions — AIC", icon: "🏛️", cat: "art", size: "m",
     render() {
       const el = div(loadingHTML("Fetching exhibitions…"));
-      getJSON("https://api.artic.edu/api/v1/exhibitions?fields=title,start_date,end_date,status,is_current&sort=-start_date&limit=6", 240).then((d) => {
-        el.innerHTML = (d.data || []).map((x) =>
-          row(decodeEntities(x.title), `${x.start_date?.slice(0, 7) || "?"} → ${x.end_date?.slice(0, 7) || "ongoing"}`)
-        ).join("") + `<p class="center-text" style="margin-top:8px;font-size:10px">Art Institute of Chicago · artic.edu</p>`;
+      getJSON("https://api.artic.edu/api/v1/exhibitions?fields=id,title,start_date,end_date,status,is_current,short_description,image_id,location&sort=-start_date&limit=8", 240).then((d) => {
+        const items = (d.data || []).filter(x => x.is_current || x.status === "open").slice(0, 3);
+        if (!items.length) {
+          el.innerHTML = `<p class="center-text" style="padding:20px">No current exhibitions</p>`;
+          return;
+        }
+        el.innerHTML = items.map((x) => {
+          const imgUrl = x.image_id ? `https://www.artic.edu/iiif/2/${x.image_id}/full/400,/0/default.jpg` : "";
+          return `
+            <div class="exhibition-card" style="margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--line)">
+              ${imgUrl ? `<img src="${imgUrl}" alt="" style="width:100%;height:100px;object-fit:cover;border-radius:8px;margin-bottom:6px;background:var(--card)"/>` : ""}
+              <h4 style="font-size:12px;font-weight:700;margin-bottom:3px;line-height:1.2">${decodeEntities(x.title)}</h4>
+              <div style="font-size:9px;color:var(--muted);margin-bottom:2px">📍 ${esc(x.location || "Art Institute of Chicago")}</div>
+              <div style="font-size:9px;color:var(--muted);margin-bottom:4px">📅 ${x.start_date?.slice(0,10) || "?"} → ${x.end_date?.slice(0,10) || "ongoing"}</div>
+              ${x.short_description ? `<div style="font-size:9.5px;line-height:1.4;color:var(--ink);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${decodeEntities(x.short_description)}</div>` : ""}
+            </div>
+          `;
+        }).join("") + `<p class="center-text" style="margin-top:6px;font-size:9px">Art Institute of Chicago · artic.edu</p>`;
       }).catch(() => { el.innerHTML = errorHTML("AIC unreachable"); });
       return el;
     },
   },
   colorStories: {
-    title: "Daily Palette", icon: "🌈", cat: "art", size: "s",
+    title: "Daily Color Palettes", icon: "🌈", cat: "art", size: "m",
     render() {
       const daySeed = Math.floor(Date.now() / 86400000);
       const SEEDS = ["2461A7", "E85D75", "7A9E7E", "F2A104", "6C5CE7", "0FA3B1", "D64550", "8E7DBE", "F4ACB7", "3D5A80", "EE964B", "29335C", "94D2BD", "E4572E", "76B041", "B388EB"];
       const MODES = ["analogic", "monochrome", "triad", "complement", "quad"];
-      const el = div(loadingHTML("Mixing today's palettes…"));
+      const MODE_LABELS = { analogic: "Analogous", monochrome: "Monochrome", triad: "Triad", complement: "Complement", quad: "Tetrad" };
+      const el = div(loadingHTML("Generating today's palettes…"));
       Promise.allSettled(
-        Array.from({ length: 8 }, (_, i) => {
+        Array.from({ length: 4 }, (_, i) => {
           const mode = MODES[(daySeed + i) % MODES.length];
           return getJSON(`https://www.thecolorapi.com/scheme?hex=${SEEDS[(daySeed + i * 5) % SEEDS.length]}&mode=${mode}&count=5&format=json`, 720, {}, (d) => !!d?.colors?.length)
-            .then((d) => ({ mode, colors: d.colors }))
+            .then((d) => ({ mode, modeLabel: MODE_LABELS[mode], colors: d.colors }))
             .catch(() => null);
         })
       ).then((rs) => {
         const ok = rs.map((x) => x.status === "fulfilled" ? x.value : null).filter(Boolean);
         if (!ok.length) { el.innerHTML = errorHTML("The Color API unreachable"); return; }
-        el.innerHTML = ok.map((p, i) =>
-          `<div class="palette-card"><small class="pal-mode">${p.mode} · palette ${i + 1}</small><div class="swatches">${p.colors.map((c) =>
-            `<div class="swatch" style="background:${c.hex.value}" title="${c.hex.clean} — click to copy"><span>${c.hex.clean}</span></div>`
-          ).join("")}</div></div>`
-        ).join("") + `<p class="center-text" style="margin-top:8px;font-size:10px">${ok.length} fresh palettes daily · thecolorapi.com</p>`;
+        el.innerHTML = ok.map((p) =>
+          `<div class="palette-card" style="margin-bottom:10px">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+              <small class="pal-mode" style="font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px;font-size:9px">${p.modeLabel}</small>
+              <small style="color:var(--muted);font-size:9px">#${p.colors[0].hex.clean}</small>
+            </div>
+            <div class="swatches" style="display:flex;gap:4px">${p.colors.map((c, ci) =>
+              `<div class="swatch" style="flex:1;min-width:40px;aspect-ratio:1;border-radius:8px;cursor:pointer;position:relative;background:${c.hex.value}" title="${c.hex.clean} — click to copy">
+                <span style="position:absolute;bottom:3px;left:50%;transform:translateX(-50%);font-size:7px;color:${c.hex.value === '#000000' ? '#fff' : '#000'};text-shadow:0 1px 2px ${c.hex.value === '#000000' ? '#000' : '#fff'};white-space:nowrap">${c.hex.clean}${ci===0?'·base':''}</span>
+              </div>`
+            ).join("")}</div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:3px;margin-top:5px;font-size:8px;color:var(--muted)">
+              <div>RGB: ${p.colors[0].rgb.r},${p.colors[0].rgb.g},${p.colors[0].rgb.b}</div>
+              <div>HSL: ${p.colors[0].hsl.h}° ${p.colors[0].hsl.s}% ${p.colors[0].hsl.l}%</div>
+              <div>CMYK: ${Math.round(p.colors[0].cmyk.c)}% ${Math.round(p.colors[0].cmyk.m)}% ${Math.round(p.colors[0].cmyk.y)}% ${Math.round(p.colors[0].cmyk.k)}%</div>
+            </div>
+          </div>`
+        ).join("") + `<p class="center-text" style="margin-top:6px;font-size:9px">${ok.length} palettes · thecolorapi.com</p>`;
         el.querySelectorAll(".swatch").forEach((sw) =>
           sw.addEventListener("click", () => {
-            navigator.clipboard?.writeText("#" + sw.querySelector("span").textContent);
-            toast("📋 #" + sw.querySelector("span").textContent + " copied");
+            const hex = sw.querySelector("span").textContent.split("·")[0];
+            navigator.clipboard?.writeText(hex);
+            toast("📋 " + hex + " copied");
           })
         );
       });
@@ -1753,28 +1790,45 @@ const WIDGETS = {
     },
   },
   livingGallery: {
-    title: "Living Gallery", icon: "🏛️", cat: "art", size: "m",
+    title: "Living Gallery — Met Highlights", icon: "🏛️", cat: "art", size: "m",
     render() {
-      const el = div(loadingHTML("Curating The Met highlights…"));
+      const el = div(loadingHTML("Curating masterpieces…"));
       let pool = null, idx = -1, timer = null;
       const show = () => {
         if (!pool || !pool.length) return;
-        idx = (idx + 1 + Math.floor(Math.random() * 2)) % pool.length;
+        idx = (idx + 1) % pool.length;
         const o = pool[idx];
+        const details = [
+          o.artist && `🎨 ${esc(o.artist)}`,
+          o.date && `📅 ${esc(o.date)}`,
+          o.medium && `🖌️ ${esc(o.medium)}`,
+          o.dimensions && `📏 ${esc(o.dimensions)}`,
+          o.culture && `🌍 ${esc(o.culture)}`,
+        ].filter(Boolean).slice(0, 3);
+        
         el.innerHTML = `
-          ${o.img ? `<img class="art-img" src="${o.img}" alt="" style="width:100%;height:auto;border-radius:12px;margin-bottom:8px"/>` : ""}
-          <div class="quote-box" style="padding-top:4px">«${esc(o.title)}»<span class="quote-author">${esc(o.artist)}${o.date ? " · " + esc(o.date) : ""} · The Met</span></div>
-          <p class="center-text" style="margin-top:6px;font-size:10px">Rotates automatically · <a href="https://www.metmuseum.org/art/collection/search/${o.id}" target="_blank" style="color:var(--muted)">view at metmuseum.org</a></p>`;
+          ${o.img ? `<img class="art-img" src="${o.img}" alt="${esc(o.title)}" style="width:100%;height:auto;max-height:45%;border-radius:10px;margin-bottom:8px;object-fit:contain;background:var(--card)"/>` : ""}
+          <div class="art-info">
+            <h3 style="font-size:13px;font-weight:700;margin-bottom:6px;line-height:1.2">«${esc(o.title)}»</h3>
+            <div style="font-size:10.5px;line-height:1.5;color:var(--ink)">${details.map(d => `<div>${d}</div>`).join("")}</div>
+          </div>
+          <p class="center-text" style="margin-top:6px;font-size:9px">Auto-rotates 90s · <a href="https://www.metmuseum.org/art/collection/search/${o.id}" target="_blank" style="color:var(--accent)">View at The Met ↗</a></p>`;
       };
       getJSON("https://collectionapi.metmuseum.org/public/collection/v1/search?isHighlight=true&hasImages=true&q=painting", 1440, {}, (d) => !!d?.objectIDs?.length).then((s) => {
-        const ids = s.objectIDs.slice(0, 10);
+        const ids = s.objectIDs.slice(0, 12);
         return Promise.allSettled(ids.map((id) =>
           getJSON(`https://collectionapi.metmuseum.org/public/collection/v1/objects/${id}`, 1440, {}, (o) => !!o?.primaryImageSmall)
         ));
       }).then((rs) => {
         pool = rs.filter((x) => x.status === "fulfilled").map((x) => x.value).map((o) => ({
-          id: o.objectID, img: o.primaryImageSmall, title: decodeEntities(o.title || "Untitled"),
-          artist: decodeEntities(o.artistDisplayName || "Unknown artist"), date: o.objectDate || "",
+          id: o.objectID,
+          img: o.primaryImage || o.primaryImageSmall,
+          title: decodeEntities(o.title || "Untitled"),
+          artist: decodeEntities(o.artistDisplayName || "Unknown artist"),
+          date: o.objectDate || "",
+          medium: decodeEntities(o.medium || ""),
+          dimensions: decodeEntities(o.dimensions || ""),
+          culture: decodeEntities(o.culture || ""),
         }));
         if (!pool.length) throw new Error("empty");
         show();
@@ -1784,7 +1838,7 @@ const WIDGETS = {
     },
   },
   wordOfWisdom: {
-    title: "Wise Words", icon: "🦉", cat: "fun", size: "s",
+    title: "Wise Words", icon: "🦉", cat: "fun", size: "m",
     render() {
       const el = div(loadingHTML());
       const FALLBACK = [
@@ -1816,7 +1870,7 @@ const WIDGETS = {
     },
   },
   flagQuiz: {
-    title: "Guess the Flag", icon: "🚩", cat: "fun", size: "s",
+    title: "Guess the Flag", icon: "🚩", cat: "fun", size: "m",
     render() {
       const FLAGS = [["🇯🇵", "Japan"], ["🇧🇷", "Brazil"], ["🇫🇷", "France"], ["🇪🇬", "Egypt"], ["🇮🇳", "India"], ["🇰🇪", "Kenya"], ["🇨🇦", "Canada"], ["🇩🇪", "Germany"], ["🇦🇺", "Australia"], ["🇲🇽", "Mexico"], ["🇮🇹", "Italy"], ["🇰🇷", "South Korea"], ["🇳🇬", "Nigeria"], ["🇦🇷", "Argentina"], ["🇹🇷", "Türkiye"], ["🇸🇪", "Sweden"], ["🇿🇦", "South Africa"], ["🇮🇩", "Indonesia"], ["🇳🇱", "Netherlands"], ["🇸🇦", "Saudi Arabia"], ["🇨🇭", "Switzerland"], ["🇵🇹", "Portugal"], ["🇬🇷", "Greece"], ["🇻🇳", "Vietnam"], ["🇵🇱", "Poland"], ["🇮🇷", "Iran"], ["🇪🇸", "Spain"], ["🇨🇱", "Chile"], ["🇲🇦", "Morocco"], ["🇹🇭", "Thailand"], ["🇮🇪", "Ireland"], ["🇺🇦", "Ukraine"]];
       const ROUNDS = 8;
@@ -1863,7 +1917,7 @@ const WIDGETS = {
     },
   },
   mathBlitz: {
-    title: "Math Blitz · 30s", icon: "🧮", cat: "fun", size: "s",
+    title: "Math Blitz · 30s", icon: "🧮", cat: "fun", size: "m",
     render() {
       const el = div(`<div class="mb-wrap"></div>`);
       const box = el.querySelector(".mb-wrap");
@@ -1923,7 +1977,7 @@ const WIDGETS = {
     },
   },
   memoryMatch: {
-    title: "Memory Match", icon: "🃏", cat: "fun", size: "s",
+    title: "Memory Match", icon: "🃏", cat: "fun", size: "m",
     render() {
       const EMOJI = ["🍎", "🌟", "🐼", "🎈", "🎸", "🌵", "🚀", "🐙"];
       const el = div(`<div class="mm-wrap"></div>`);
@@ -1972,7 +2026,7 @@ const WIDGETS = {
     },
   },
   reactionTest: {
-    title: "Reaction Test", icon: "⚡", cat: "fun", size: "s",
+    title: "Reaction Test", icon: "⚡", cat: "fun", size: "m",
     render() {
       const el = div(`<div class="rt-wrap"></div>`);
       const box = el.querySelector(".rt-wrap");
@@ -2023,7 +2077,7 @@ const WIDGETS = {
   },
 
   dailyJoke: {
-    title: "Joke of the Day", icon: "😂", cat: "fun", size: "s",
+    title: "Joke of the Day", icon: "😂", cat: "fun", size: "m",
     render() {
       const el = div(loadingHTML());
       const fallback = () => { el.innerHTML = `<div class="quote-box">Why do programmers prefer dark mode? Because bugs are attracted to light!</div>`; };
@@ -2133,7 +2187,7 @@ const WIDGETS = {
     },
   },
   funFacts: {
-    title: "Did You Know?", icon: "💡", cat: "fun", size: "s",
+    title: "Did You Know?", icon: "💡", cat: "fun", size: "m",
     render() {
       const el = div(loadingHTML());
       getJSON("https://uselessfacts.jsph.pl/api/v2/facts/random", 360).then((d) => {
@@ -2145,7 +2199,7 @@ const WIDGETS = {
     },
   },
   rpsLeague: {
-    title: "RPS League", icon: "✊", cat: "fun", size: "s",
+    title: "RPS League", icon: "✊", cat: "fun", size: "m",
     render() {
       if (!state.rps) state.rps = { w: 0, l: 0, t: 0, streak: 0, bestStreak: 0 };
       const MOVES = [["✊", "Rock"], ["✋", "Paper"], ["✌️", "Scissors"]];
@@ -2570,6 +2624,7 @@ const sideNav = document.getElementById("sideNav");
 const grid = document.getElementById("widgetGrid");
 
 function withFlip(mutate) {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) { mutate(); return; }
   const widgets = [...grid.querySelectorAll(".widget")];
   const first = new Map(widgets.map((w) => [w.dataset.id, w.getBoundingClientRect()]));
   mutate();
@@ -2614,45 +2669,256 @@ function getOrder(catKey) {
 
 function sizeOf(catKey, id) {
   const v = state.sizes[catKey + ":" + id];
-  return v === "m" ? "m" : "s";
+  const def = WIDGETS[id];
+  if (def && def.cat === "art") {
+    if (v === "s" || !v) return "m";
+  }
+  return ["s", "m", "l"].includes(v) ? v : "m";
+}
+
+const WIDGET_SIZE_LABELS = { s: "Small", m: "Medium", l: "Large" };
+
+function setWidgetSize(card, catKey, id, size) {
+  if (!WIDGET_SIZE_LABELS[size]) return;
+  if (grid.canvas?.has(card)) { grid.canvas.preset(card, size); return; }
+  delete state.customSizes[catKey + ":" + id];
+  card.removeAttribute("data-custom-size");
+  ["width", "height", "min-height", "grid-column"].forEach((property) => card.style.removeProperty(property));
+  state.sizes[catKey + ":" + id] = size;
+  saveState();
+  // Keep the mounted content: changing size must not reset inputs, audio or games.
+  withFlip(() => {
+    card.classList.remove("size-s", "size-m", "size-l");
+    card.classList.add("size-" + size);
+    card.dispatchEvent(new Event("widgetsizechange"));
+  });
+}
+
+function setupAdaptiveContent(card, catKey, id, body) {
+  const rowSelector = ".list-row:not(.lb-row), .market-row, .todo-item, tbody > tr";
+  let pending = 0;
+  const excerpt = (text, limit) => {
+    if (text.length <= limit) return text;
+    const cut = text.slice(0, limit);
+    const space = cut.lastIndexOf(" ");
+    return cut.slice(0, space > limit * 0.6 ? space : limit).trimEnd() + "…";
+  };
+  const refresh = () => {
+    pending = 0;
+    if (!card.isConnected) return;
+    // Observe the renderer, not our own presentation updates.
+    observer.disconnect();
+    const size = sizeOf(catKey, id);
+    const limit = size === "s" ? 2 : size === "m" ? 5 : Infinity;
+    body.querySelectorAll("[data-density-hidden]").forEach((el) => el.removeAttribute("data-density-hidden"));
+    const hide = (el) => el.setAttribute("data-density-hidden", "");
+    // Budgets apply per list, preserving useful groups (e.g. both gainers and losers).
+    const groups = new Map();
+    body.querySelectorAll(rowSelector).forEach((el) => {
+      let group = el.parentElement;
+      for (let sibling = el.previousElementSibling; sibling; sibling = sibling.previousElementSibling) {
+        if (sibling.matches(".lib-group-title")) { group = sibling; break; }
+      }
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(el);
+    });
+    groups.forEach((rows) => rows.slice(limit).forEach(hide));
+    for (const [selector, small, medium] of [
+      [".quick-links-grid > *", 4, 12], [".summary-grid > *", 3, 6],
+      [".genre-grid > *", 2, 6], [".tf-info-grid > *", 1, 3],
+    ]) {
+      Array.from(body.querySelectorAll(selector)).slice(size === "s" ? small : size === "m" ? medium : Infinity).forEach(hide);
+    }
+    // Do not leave orphan date/group headings when their rows are summarized.
+    body.querySelectorAll(".ls-day, .lib-group-title").forEach((heading) => {
+      let next = heading.nextElementSibling;
+      let visible = false;
+      while (next && !next.matches(".ls-day, .lib-group-title, .center-text")) {
+        if (!next.hasAttribute("data-density-hidden")) visible = true;
+        next = next.nextElementSibling;
+      }
+      if (!visible) heading.setAttribute("data-density-hidden", "");
+    });
+    const secondary = size === "s"
+      ? ".alarm-head, .alarm-list, .alarm-add, .fg-bars, .lb-box, .np-bar, .np-time"
+      : size === "m" ? ".alarm-head, .alarm-list, .alarm-add, .lb-box" : null;
+    if (secondary) body.querySelectorAll(secondary).forEach(hide);
+    // Small calendar shows the current week (first week for other months).
+    if (size === "s") body.querySelectorAll(".cal-days").forEach((days) => {
+      const cells = Array.from(days.children);
+      const today = cells.findIndex((el) => el.classList.contains("today"));
+      const start = Math.floor(Math.max(0, today) / 7) * 7;
+      cells.forEach((el, i) => { if (i < start || i >= start + 7) hide(el); });
+    });
+    body.querySelectorAll(".quote-box:not(.ticket-connect):not(.widget-excerpt)").forEach((quote) => {
+      // Interactive result cards stay intact; only static reading is summarized.
+      if (quote.querySelector("button, input, a")) return;
+      let preview = quote.previousElementSibling;
+      if (!preview?.classList.contains("widget-excerpt")) {
+        preview = document.createElement("div");
+        preview.className = "widget-excerpt quote-box";
+        quote.before(preview);
+      }
+      const text = Array.from(quote.childNodes).filter((n) => !n.classList?.contains("quote-author")).map((n) => n.textContent).join("").trim();
+      const shortened = excerpt(text, size === "s" ? 110 : size === "m" ? 300 : Infinity);
+      preview.hidden = shortened === text;
+      if (!preview.hidden) {
+        preview.textContent = shortened;
+        const author = quote.querySelector(".quote-author");
+        if (author) preview.appendChild(author.cloneNode(true));
+        hide(quote);
+      }
+    });
+    if (id === "notes") {
+      const editor = body.querySelector("textarea");
+      let preview = body.querySelector(".note-preview");
+      if (!preview) {
+        preview = document.createElement("button");
+        preview.type = "button";
+        preview.className = "note-preview";
+        preview.setAttribute("aria-label", "Open full note for editing");
+        editor.before(preview);
+        preview.addEventListener("click", () => {
+          setWidgetSize(card, catKey, id, "l");
+          requestAnimationFrame(() => editor.focus());
+        });
+      }
+      const text = editor.value.trim();
+      preview.textContent = text ? excerpt(text.replace(/\s+/g, " "), size === "s" ? 110 : 400) : "Write a note…";
+      preview.hidden = size === "l";
+      if (size !== "l") hide(editor);
+      else {
+        editor.style.height = "auto";
+        const css = getComputedStyle(editor);
+        const borders = parseFloat(css.borderTopWidth) + parseFloat(css.borderBottomWidth);
+        editor.style.height = Math.max(220, editor.scrollHeight + borders) + "px";
+      }
+    }
+    const games = {
+      triviaQuiz: "A ten-question trivia round.", flagQuiz: "Identify the flag in eight rounds.",
+      mathBlitz: "Solve as many sums as you can in 30 seconds.", memoryMatch: "Find all eight matching pairs.",
+      reactionTest: "Test how quickly you react.", higherLower: "Guess whether the next number is higher or lower.",
+    };
+    if (games[id]) {
+      let preview = card.querySelector(".game-preview");
+      if (!preview) {
+        preview = document.createElement("div");
+        preview.className = "game-preview";
+        const summary = document.createElement("p");
+        summary.textContent = games[id];
+        const play = document.createElement("button");
+        play.className = "lib-chip";
+        play.textContent = "Open game →";
+        play.addEventListener("click", () => setWidgetSize(card, catKey, id, "m"));
+        preview.append(summary, play);
+        body.after(preview);
+      }
+      preview.hidden = size !== "s";
+      body.hidden = size === "s";
+    }
+    observer.observe(body, { childList: true, subtree: true, characterData: true });
+  };
+  const schedule = () => { if (!pending) pending = requestAnimationFrame(refresh); };
+  const observer = new MutationObserver(schedule);
+  observer.observe(body, { childList: true, subtree: true, characterData: true });
+  card.addEventListener("widgetsizechange", refresh);
+  body.addEventListener("input", schedule);
+  // Width changes can reflow a long editable note without any text mutation.
+  let width = 0;
+  const resize = new ResizeObserver(([entry]) => {
+    if (entry.contentRect.width !== width) { width = entry.contentRect.width; schedule(); }
+  });
+  resize.observe(body);
+  card.cleanupAdaptive = () => { observer.disconnect(); resize.disconnect(); cancelAnimationFrame(pending); };
+  schedule();
+}
+
+function mountWidgetCanvas(catKey) {
+  grid.canvas = createWidgetCanvas(grid, {
+    page(profile) {
+      state.layouts ||= {};
+      state.layouts[catKey] ||= {};
+      return state.layouts[catKey][profile] ||= { manual: false, widgets: {} };
+    },
+    defaultRect(card, available, preset) {
+      const id = card.dataset.id, size = preset || sizeOf(catKey, id);
+      const columns = Math.max(1, Math.floor((available + 16) / 266));
+      const unit = Math.min(300, (available - (columns - 1) * 16) / columns);
+      const art = card.dataset.adaptive !== 'true';
+      const legacy = !preset && state.customSizes[catKey + ':' + id];
+      return WidgetLayout.normalize({
+        x: 0, y: 0, size,
+        width: Math.min(available, legacy?.width || (art ? 320 : size === 's' ? Math.min(unit, 230) : size === 'l' ? unit * 2 + 16 : unit)),
+        height: legacy?.height || (art ? size === 'l' ? 540 : 380 : {s:190,m:310,l:420}[size]),
+        custom: !!legacy,
+      });
+    },
+    present(card, rect) {
+      const id = card.dataset.id;
+      const changed = !card.classList.contains('size-' + rect.size) || state.sizes[catKey + ':' + id] !== rect.size;
+      state.sizes[catKey + ':' + id] = rect.size;
+      card.classList.remove('size-s', 'size-m', 'size-l');
+      card.classList.add('size-' + rect.size);
+      if (changed) card.dispatchEvent(new Event('widgetsizechange'));
+    },
+    save(page) {
+      for (const card of grid.querySelectorAll('.widget')) {
+        const r = page.widgets[card.dataset.id];
+        if (!r) continue;
+        const key = catKey + ':' + card.dataset.id;
+        state.sizes[key] = r.size;
+        if (r.custom) state.customSizes[key] = {width:r.width,height:r.height};
+        else delete state.customSizes[key];
+      }
+      saveState();
+    },
+    transfer(card, nav) {
+      dragSrcId = card.dataset.id;
+      nav.dispatchEvent(new Event('drop', {bubbles:true,cancelable:true}));
+      dragSrcId = null;
+    },
+    undoButton: document.getElementById('undoLayoutBtn'),
+    arrangeButton: document.getElementById('arrangeWidgetsBtn'),
+  });
 }
 
 function buildWidget(catKey, id) {
   const def = WIDGETS[id];
+  const adaptive = catKey !== "art" && def.cat !== "art";
   const card = document.createElement("article");
   card.className = "widget size-" + sizeOf(catKey, id);
   card.dataset.id = id;
-  card.draggable = true;
-  card.querySelectorAll("textarea, input, button, select").forEach((el) => {
-    el.addEventListener("mousedown", () => (card.draggable = false));
-    document.addEventListener("mouseup", () => (card.draggable = true), { once: true });
-  });
+  if (adaptive) card.dataset.adaptive = "true";
+  card.draggable = false;
 
   const header = document.createElement("div");
   header.className = "widget-header";
   header.innerHTML =
-    `<span class="widget-grab" draggable="true" title="Drag to move">⋮⋮</span>` +
-    `<span>${def.icon}</span><span class="widget-title">${def.title}</span>` +
-    `<button class="w-action act-size" title="Resize S/M">⤢</button>` +
+    `<span class="widget-icon">${def.icon}</span><span class="widget-title">${def.title}</span>` +
+    (id === "clock" ? `<button class="w-action act-alarm" title="Add or manage alarms" aria-label="Add alarm">＋</button>` : "") +
     (def.detail ? `<button class="w-action act-detail" title="Details">🔍</button>` : "") +
     `<button class="w-action act-remove" title="Remove from this page">✕</button>`;
   card.appendChild(header);
+  const title = header.querySelector(".widget-title");
+  title.tabIndex = 0;
+  title.title = "Drag to move. Arrow keys move; Alt + arrows resize; Shift for larger steps.";
+  title.setAttribute("aria-label", def.title + ". " + title.title);
+
+  const resizeHandles = document.createElement("div");
+  resizeHandles.className = "widget-resize-handles";
+  resizeHandles.innerHTML = `
+    <div class="resize-handle se" data-dir="se" title="Resize from bottom-right"></div>
+  `;
+  card.appendChild(resizeHandles);
 
   const body = document.createElement("div");
   body.className = "widget-body";
   body.appendChild(def.render());
   card.appendChild(body);
 
-  header.querySelector(".act-size").addEventListener("click", () => {
-    const cur = sizeOf(catKey, id);
-    const next = cur === "s" ? "m" : "s";
-    state.sizes[catKey + ":" + id] = next;
-    saveState();
-    withFlip(() => {
-      card.className = "widget size-" + next;
-    });
-  });
+  if (adaptive) setupAdaptiveContent(card, catKey, id, body);
 
+  header.querySelector(".act-alarm")?.addEventListener("click", openAlarmModal);
   const detBtn = header.querySelector(".act-detail");
   if (detBtn) detBtn.addEventListener("click", () => openModal(def.title, def.detail()));
 
@@ -2663,57 +2929,148 @@ function buildWidget(catKey, id) {
     withFlip(() => renderGrid());
   });
 
-  const grab = header.querySelector(".widget-grab");
-  card.addEventListener("dragstart", (e) => {
-    dragSrcId = id;
-    card.classList.add("dragging");
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", id);
-  });
-  card.addEventListener("dragend", () => {
-    card.classList.remove("dragging");
-    clearDragMarkers();
-    sideNav.querySelectorAll(".nav-item.drop-target").forEach((n) => n.classList.remove("drop-target"));
-  });
-
-  card.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    if (!dragSrcId || dragSrcId === id) return;
-    clearDragMarkers(card);
-    const rect = card.getBoundingClientRect();
-    card.classList.add(e.clientY > rect.top + rect.height / 2 ? "drag-over-bottom" : "drag-over-top");
-  });
-  card.addEventListener("drop", (e) => {
-    e.preventDefault();
-    handleDrop(id, card, e);
-  });
-  card.addEventListener("dragleave", () => card.classList.remove("drag-over-top", "drag-over-bottom"));
-
   return card;
 }
 
 let dragSrcId = null;
 
-function clearDragMarkers(except) {
-  grid.querySelectorAll(".widget").forEach((w) => {
-    if (w !== except) w.classList.remove("drag-over-top", "drag-over-bottom");
+const alarmSound = NexoraAlarms.createSound(window.AudioContext || window.webkitAudioContext);
+let alarmQueue = [];
+let alarmChecking = false;
+function readSavedAlarms() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORE_KEY));
+    if (Array.isArray(saved?.alarms)) state.alarms = saved.alarms;
+  } catch (_) {}
+  if (!Array.isArray(state.alarms)) state.alarms = [];
+}
+function persistAlarms() {
+  // Preserve unrelated changes made in another open tab.
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORE_KEY));
+    localStorage.setItem(STORE_KEY, JSON.stringify({...state, ...saved, alarms: state.alarms}));
+  } catch (_) { saveState(); }
+}
+function showRingingAlarm() {
+  document.getElementById('ringingAlarm')?.remove();
+  alarmSound.stop();
+  if (!alarmQueue.length) return;
+  const alarm = alarmQueue[0];
+  const audible = alarmSound.play(alarm.sound, alarm.volume);
+  const panel = div(`<strong>⏰ ${esc(alarm.label || 'Alarm')}</strong><p>${esc(alarm.time)} · ${audible ? 'Gentle alarm · up to 30 seconds' : 'Sound needs a click to start'}</p><div class="alarm-actions"><button type="button" class="lib-chip alarm-play">Play sound</button><button type="button" class="lib-chip alarm-snooze">Snooze 5 min</button><button type="button" class="lib-chip alarm-stop">Stop</button></div>`);
+  panel.id = 'ringingAlarm'; panel.className = 'alarm-notification';
+  panel.setAttribute('role', 'alert');
+  panel.querySelector('.alarm-play').hidden = audible;
+  panel.querySelector('.alarm-play').onclick = async () => {
+    if (await alarmSound.unlock()) { alarmSound.play(alarm.sound, alarm.volume); panel.querySelector('p').textContent = 'Gentle alarm · up to 30 seconds'; }
+    else panel.querySelector('p').textContent = 'Audio unavailable. Check browser and device sound settings.';
+  };
+  const dismiss = snooze => {
+    readSavedAlarms();
+    const saved = state.alarms.find(item => item.id === alarm.id);
+    if (saved && snooze) { saved.snoozeUntil = Date.now() + 300000; persistAlarms(); }
+    alarmQueue.shift(); showRingingAlarm();
+  };
+  panel.querySelector('.alarm-snooze').onclick = () => dismiss(true);
+  panel.querySelector('.alarm-stop').onclick = () => dismiss(false);
+  document.body.appendChild(panel);
+}
+function startAlarmService() {
+  readSavedAlarms();
+  let migrated = false;
+  state.alarms.forEach(alarm => {
+    if (!alarm.id) { alarm.id = crypto.randomUUID(); migrated = true; }
   });
+  if (migrated) persistAlarms();
+  const check = async () => {
+    if (alarmChecking) return;
+    // Let an audible tab handle the alarm instead of a silent background tab.
+    if (document.hidden && !alarmSound.ready()) return;
+    alarmChecking = true;
+    const claim = () => {
+      readSavedAlarms();
+      const before = JSON.stringify(state.alarms);
+      const due = NexoraAlarms.claimDue(state.alarms);
+      if (JSON.stringify(state.alarms) !== before) persistAlarms();
+      if (due.length) {
+        const wasEmpty = !alarmQueue.length;
+        alarmQueue.push(...due);
+        if (wasEmpty) showRingingAlarm();
+      }
+    };
+    try {
+      // Only one same-origin tab claims each scheduled occurrence.
+      if (navigator.locks) await navigator.locks.request('nexora-alarm-check', claim);
+      else claim();
+    } finally { alarmChecking = false; }
+  };
+  setInterval(check, 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+  window.addEventListener('storage', event => { if (event.key === STORE_KEY) readSavedAlarms(); });
+  check();
 }
-
-function handleDrop(targetId, targetCard, e) {
-  if (!dragSrcId || dragSrcId === targetId) return;
-  const catKey = state.activeCategory;
-  const order = getOrder(catKey).filter((x) => x !== dragSrcId);
-  let idx = order.indexOf(targetId);
-  const rect = targetCard.getBoundingClientRect();
-  if (e.clientY > rect.top + rect.height / 2) idx += 1;
-  order.splice(idx, 0, dragSrcId);
-  state.orders[catKey] = order;
-  saveState();
-  withFlip(() => renderGrid());
+function openAlarmModal() {
+  readSavedAlarms();
+  const next = new Date(Date.now() + 60000);
+  const time = `${String(next.getHours()).padStart(2,'0')}:${String(next.getMinutes()).padStart(2,'0')}`;
+  const wrap = div(`<p class="alarm-help">Times use your device’s local timezone. Keep this page open and your device awake. After reopening, enable sound here. Background browser limits can delay alarms.</p>
+    <button type="button" class="lib-chip alarm-enable">Enable sound</button><p class="alarm-status" role="status"></p>
+    <form class="alarm-form">
+      <label>Time<input name="time" type="time" value="${time}" required></label>
+      <label>Name<input name="label" maxlength="80" placeholder="e.g. Take a break"></label>
+      <label>Repeat<select name="repeat"><option value="daily">Every day</option><option value="once">Once, on a date</option></select></label>
+      <label class="alarm-date" hidden>Date<input name="date" type="date" value="${NexoraAlarms.localDate(next)}"></label>
+      <label>Sound<select name="sound"><option value="chime">Soft chime</option><option value="bell">Gentle bell</option></select></label>
+      <label>Volume <output>30%</output><input name="volume" aria-label="Alarm volume" type="range" min="10" max="100" value="30"></label>
+      <div class="alarm-actions"><button type="button" class="lib-chip alarm-preview">▶ Preview sound</button><button class="lib-chip alarm-save" type="submit">＋ Save alarm</button></div>
+    </form><h4>Saved alarms</h4><div class="saved-alarms"></div>`);
+  wrap.className = 'alarm-settings';
+  const form = wrap.querySelector('form'), fields = form.elements;
+  const status = wrap.querySelector('.alarm-status');
+  const enable = async () => {
+    const ready = await alarmSound.unlock();
+    status.textContent = ready ? 'Sound enabled for this page. Keep device volume audible.' : 'Audio could not start. Check your browser’s sound permissions.';
+    return ready;
+  };
+  wrap.querySelector('.alarm-enable').onclick = enable;
+  status.textContent = alarmSound.ready() ? 'Sound is enabled for this page.' : 'Click Enable sound or Preview before relying on an alarm.';
+  fields.repeat.onchange = () => {
+    wrap.querySelector('.alarm-date').hidden = fields.repeat.value !== 'once';
+    fields.date.required = fields.repeat.value === 'once';
+  };
+  fields.volume.oninput = () => { form.querySelector('output').value = fields.volume.value + '%'; };
+  wrap.querySelector('.alarm-preview').onclick = async () => {
+    if (alarmQueue.length) { status.textContent = 'Stop the current alarm before previewing another sound.'; return; }
+    if (await enable()) alarmSound.play(fields.sound.value, fields.volume.value, 2);
+  };
+  const paint = () => {
+    const list = wrap.querySelector('.saved-alarms');
+    list.innerHTML = state.alarms.map((alarm, i) => `<div class="saved-alarm"><div><strong>${esc(alarm.time)} · ${esc(alarm.label || 'Alarm')}</strong><small>${alarm.repeat === 'once' ? esc(alarm.date || '') : 'Every day'}${alarm.snoozeUntil ? ' · Snoozed 5 min' : ''}</small></div><button type="button" class="w-action" data-toggle="${i}" aria-label="${alarm.enabled ? 'Disable' : 'Enable'} alarm" aria-pressed="${!!alarm.enabled}">${alarm.enabled ? '🔔' : '🔕'}</button><button type="button" class="w-action" data-delete="${i}" aria-label="Delete alarm">✕</button></div>`).join('') || '<p class="alarm-help">No alarms yet. Add your first one above.</p>';
+    list.querySelectorAll('[data-toggle]').forEach(button => { button.onclick = async () => {
+      const id = state.alarms[+button.dataset.toggle]?.id;
+      readSavedAlarms(); const alarm = state.alarms.find(item => item.id === id); if (!alarm) return paint();
+      if (!alarm.enabled && alarm.repeat === 'once' && new Date(alarm.date + 'T' + alarm.time) <= new Date()) { status.textContent = 'That date has passed. Create a new alarm for a future time.'; return; }
+      alarm.enabled = !alarm.enabled; delete alarm.snoozeUntil;
+      persistAlarms(); paint(); if (alarm.enabled) await enable();
+    }; });
+    list.querySelectorAll('[data-delete]').forEach(button => { button.onclick = () => {
+      const id = state.alarms[+button.dataset.delete]?.id;
+      readSavedAlarms(); state.alarms = state.alarms.filter(item => item.id !== id); persistAlarms(); paint();
+      alarmQueue = alarmQueue.filter(item => item.id !== id); showRingingAlarm();
+    }; });
+  };
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (fields.repeat.value === 'once' && new Date(fields.date.value + 'T' + fields.time.value) <= new Date()) { status.textContent = 'Choose a future date and time.'; fields.time.focus(); return; }
+    readSavedAlarms();
+    state.alarms.push({id:crypto.randomUUID(), time:fields.time.value, label:fields.label.value.trim(), repeat:fields.repeat.value, date:fields.date.value, sound:fields.sound.value, volume:Number(fields.volume.value), enabled:true});
+    persistAlarms(); paint();
+    const ready = await enable();
+    status.textContent = ready ? 'Alarm saved. Sound is enabled while this page stays open.' : 'Alarm saved, but sound is not enabled. Use Enable sound before relying on it.';
+  };
+  paint(); openModal('⏰ Alarms', wrap);
+  fields.time.focus();
 }
-
-grid.addEventListener("dragover", (e) => e.preventDefault());
 
 function openModal(title, bodyEl) {
   const root = document.getElementById("modalRoot");
@@ -2850,12 +3207,22 @@ function buildSidebar() {
 }
 
 function renderGrid() {
+  grid.canvas?.destroy();
+  grid.canvas = null;
   if (!getCats()[state.activeCategory]) state.activeCategory = "general";
   const c = getCats()[state.activeCategory];
   document.getElementById("categoryTitle").textContent = c.label;
   document.getElementById("categoryHint").textContent = c.hint;
+  grid.querySelectorAll(".widget").forEach((card) => { card.cleanupAdaptive?.(); card.cleanupResize?.(); card.cleanupDrag?.(); });
   grid.innerHTML = "";
+  grid.classList.toggle("art-horizontal", state.activeCategory === "art");
+  if (state.activeCategory === "art") {
+    grid.style.height = "calc(100vh - 120px)";
+  } else {
+    grid.style.height = "";
+  }
   getOrder(state.activeCategory).forEach((id) => grid.appendChild(buildWidget(state.activeCategory, id)));
+  mountWidgetCanvas(state.activeCategory);
 }
 
 const STYLE_THEMES = {
@@ -3003,8 +3370,7 @@ document.getElementById("styleBtn").addEventListener("click", () => {
       state.style = key;
       saveState();
       applyTheme();
-      openStyleModal();
-      renderGrid();
+      document.querySelector("#modalRoot .modal-close")?.click();
     });
     gridEl.appendChild(card);
   }
@@ -3012,10 +3378,16 @@ document.getElementById("styleBtn").addEventListener("click", () => {
 });
 
 document.getElementById("resetBtn").addEventListener("click", () => {
+  grid.canvas?.destroy();
+  grid.canvas = null;
+  delete state.layouts[state.activeCategory];
   delete state.orders[state.activeCategory];
   delete state.removed[state.activeCategory];
   Object.keys(state.sizes).forEach((k) => {
     if (k.startsWith(state.activeCategory + ":")) delete state.sizes[k];
+  });
+  Object.keys(state.customSizes).forEach((k) => {
+    if (k.startsWith(state.activeCategory + ":")) delete state.customSizes[k];
   });
   saveState();
   renderGrid();
@@ -3035,6 +3407,7 @@ document.getElementById("newCatBtn").addEventListener("click", () => {
 });
 
 loadState();
+startAlarmService();
 render();
 
 window.addEventListener("unhandledrejection", (e) => {
